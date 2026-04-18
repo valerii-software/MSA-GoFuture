@@ -1,0 +1,71 @@
+@startuml data_replication_between_regions
+!include https://raw.githubusercontent.com/plantuml-stdlib/C4-PlantUML/master/C4_Container.puml
+
+title GoFuture - Схема репликации данных между регионами
+
+AddElementTag("primary", $bgColor="#1A5276", $fontColor="white")
+AddElementTag("replica", $bgColor="#85C1E9", $fontColor="black")
+AddElementTag("global", $bgColor="#6C3483", $fontColor="white")
+AddElementTag("cache", $bgColor="#D4AC0D", $fontColor="black")
+
+AddRelTag("async_repl", $lineColor="#E67E22", $lineStyle=DashedLine(), $textColor="#E67E22")
+AddRelTag("cdc", $lineColor="#27AE60", $lineStyle=DashedLine(), $textColor="#27AE60")
+AddRelTag("mirror", $lineColor="#8E44AD", $lineStyle=DashedLine(), $textColor="#8E44AD")
+AddRelTag("local", $lineColor="#2C3E50", $textColor="#2C3E50")
+
+' ========== FRANKFURT (Control Plane / DR Hub) ==========
+System_Boundary(fra, "Frankfurt (FRA) - Control Plane / DR Hub") {
+    ContainerDb(fra_identity, "Identity DB (Primary)", "PostgreSQL", "Глобальные данные: users, roles, permissions, sessions, tenants", $tags="global")
+    ContainerDb(fra_reference, "Reference Data (Primary)", "PostgreSQL", "Глобальные справочники: pricing_rules, tariffs, geo_zones, fraud_rules", $tags="global")
+    ContainerDb(fra_analytics, "Analytics DB (Global)", "ClickHouse", "Агрегированная аналитика из ВСЕХ регионов (анонимизированные данные)", $tags="global")
+    ContainerQueue(fra_kafka, "Kafka (Global)", "MirrorMaker 2", "Агрегация аналитических событий из всех регионов")
+}
+
+' ========== SINGAPORE (Primary SEA) ==========
+System_Boundary(sgp, "Singapore (SGP) - Primary SEA") {
+    ContainerDb(sgp_operational, "Operational DBs (Primary SGP)", "PostgreSQL x5", "bookings, drivers, pricing, payments, notification только SGP-пользователи", $tags="primary")
+    ContainerDb(sgp_identity, "Identity DB (Read Replica)", "PostgreSQL", "Локальная реплика глобальных пользователей (read-only)", $tags="replica")
+    ContainerDb(sgp_reference, "Reference Data (Read Replica)", "PostgreSQL", "Локальная копия справочников", $tags="replica")
+    ContainerDb(sgp_cache, "Redis + ES", "Redis / Elasticsearch", "driver_locations, surge, sessions (region-local)", $tags="cache")
+    ContainerQueue(sgp_kafka, "Kafka (Regional SGP)", "Apache Kafka", "Региональные события SGP-пользователей")
+}
+
+' ========== JAKARTA (Secondary SEA) ==========
+System_Boundary(jkt, "Jakarta (JKT) - Secondary SEA") {
+    ContainerDb(jkt_operational, "Operational DBs (Primary JKT)", "PostgreSQL x5", "bookings, drivers, pricing, payments, notification только JKT-пользователи", $tags="primary")
+    ContainerDb(jkt_identity, "Identity DB (Read Replica)", "PostgreSQL", "Локальная реплика (read-only)", $tags="replica")
+    ContainerDb(jkt_reference, "Reference Data (Read Replica)", "PostgreSQL", "Локальная копия справочников", $tags="replica")
+    ContainerDb(jkt_cache, "Redis + ES", "Redis / Elasticsearch", "driver_locations, surge, sessions (region-local)", $tags="cache")
+    ContainerQueue(jkt_kafka, "Kafka (Regional JKT)", "Apache Kafka", "Региональные события JKT-пользователей")
+}
+
+' ========== SAO PAULO (Primary SA) ==========
+System_Boundary(gru, "Sao Paulo (GRU) - Primary SA") {
+    ContainerDb(gru_operational, "Operational DBs (Primary GRU)", "PostgreSQL x5", "bookings, drivers, pricing, payments, notification только GRU-пользователи", $tags="primary")
+    ContainerDb(gru_identity, "Identity DB (Read Replica)", "PostgreSQL", "Локальная реплика (read-only)", $tags="replica")
+    ContainerDb(gru_reference, "Reference Data (Read Replica)", "PostgreSQL", "Локальная копия справочников", $tags="replica")
+    ContainerDb(gru_cache, "Redis + ES", "Redis / Elasticsearch", "driver_locations, surge, sessions (region-local)", $tags="cache")
+    ContainerQueue(gru_kafka, "Kafka (Regional GRU)", "Apache Kafka", "Региональные события GRU-пользователей")
+}
+
+' ========== REPLICATION: Identity (FRA -> all, async streaming) ==========
+Rel_D(fra_identity, sgp_identity, "Async streaming replication (< 500 мс)", $tags="async_repl")
+Rel_D(fra_identity, jkt_identity, "Async streaming replication (< 500 мс)", $tags="async_repl")
+Rel_D(fra_identity, gru_identity, "Async streaming replication (< 500 мс)", $tags="async_repl")
+
+' ========== REPLICATION: Reference Data (FRA -> all, CDC) ==========
+Rel_D(fra_reference, sgp_reference, "CDC (Debezium) via Kafka (< 2 с)", $tags="cdc")
+Rel_D(fra_reference, jkt_reference, "CDC (Debezium) via Kafka (< 2 с)", $tags="cdc")
+Rel_D(fra_reference, gru_reference, "CDC (Debezium) via Kafka (< 2 с)", $tags="cdc")
+
+' ========== REPLICATION: Analytics (all -> FRA, MirrorMaker 2) ==========
+Rel_U(sgp_kafka, fra_kafka, "MirrorMaker 2 (анонимизированные аналит. события)", $tags="mirror")
+Rel_U(jkt_kafka, fra_kafka, "MirrorMaker 2 (анонимизированные события)", $tags="mirror")
+Rel_U(gru_kafka, fra_kafka, "MirrorMaker 2 (анонимизированные события)", $tags="mirror")
+
+' ========== ANALYTICS AGGREGATION ==========
+Rel(fra_kafka, fra_analytics, "Flink ETL (aggregate all regions)", $tags="local")
+
+SHOW_LEGEND()
+
+@enduml

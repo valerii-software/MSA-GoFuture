@@ -1,0 +1,79 @@
+@startuml geo_routing
+!include https://raw.githubusercontent.com/plantuml-stdlib/C4-PlantUML/master/C4_Container.puml
+
+title GoFuture - Схема геомаршрутизации пользователей к ближайшему региону
+
+AddElementTag("edge", $bgColor="#E74C3C", $fontColor="white")
+AddElementTag("gateway", $bgColor="#2E86C1", $fontColor="white")
+AddElementTag("services", $bgColor="#1A5276", $fontColor="white")
+
+AddRelTag("sea_traffic", $lineColor="#27AE60", $textColor="#27AE60")
+AddRelTag("sa_traffic", $lineColor="#8E44AD", $textColor="#8E44AD")
+AddRelTag("eu_traffic", $lineColor="#2C3E50", $textColor="#2C3E50")
+AddRelTag("failover", $lineColor="#E74C3C", $lineStyle=DashedLine(), $textColor="#E74C3C")
+AddRelTag("internal", $lineColor="#7F8C8D", $textColor="#7F8C8D")
+
+' ========== USERS ==========
+Person(user_sea, "Пользователи SEA", "Пассажиры и водители в Юго-Восточной Азии (кроме Индонезии)")
+Person(user_idn, "Пользователи IDN", "Пассажиры и водители в Индонезии")
+Person(user_sa, "Пользователи SA", "Пассажиры и водители в Южной Америке")
+Person(user_eu, "Пользователи EU", "Корпоративные менеджеры, админы, европейские пользователи")
+
+' ========== GLOBAL EDGE LAYER ==========
+System_Boundary(edge_layer, "Глобальный Edge Layer (Cloudflare)") {
+    Container(geodns, "GeoDNS", "Cloudflare DNS", "Latency-based routing по IP клиента. TTL: 30 секунд. Geo-фильтры: IDN -> JKT, SEA -> SGP, SA -> GRU, EU -> FRA", $tags="edge")
+    Container(ddos, "DDoS Protection", "Cloudflare Shield", "L3/L4/L7 mitigation. Rate limiting: 50K RPS. Anycast сеть 310+ PoP. GeoIP filtering", $tags="edge")
+    Container(waf_edge, "WAF (Edge)", "Cloudflare WAF", "OWASP Top 10 rules. Bot Detection. Managed rulesets. Custom fraud patterns", $tags="edge")
+}
+
+' ========== REGIONAL ENTRY POINTS ==========
+System_Boundary(sgp_region, "Singapore Region (SGP)") {
+    Container(sgp_gw, "API Gateway", "Kong / Envoy", "Auth (JWT), routing, rate limiting, region-aware proxy", $tags="gateway")
+    Container(sgp_services, "Domain Services", "K8s (3 AZ)", "Booking, Driver, Pricing, Payments, Geography, Notification, Fraud", $tags="services")
+}
+
+System_Boundary(jkt_region, "Jakarta Region (JKT)") {
+    Container(jkt_gw, "API Gateway", "Kong / Envoy", "Auth (JWT), routing, rate limiting, region-aware proxy", $tags="gateway")
+    Container(jkt_services, "Domain Services", "K8s (3 AZ)", "Booking, Driver, Pricing, Payments, Geography, Notification, Fraud", $tags="services")
+}
+
+System_Boundary(gru_region, "Sao Paulo Region (GRU)") {
+    Container(gru_gw, "API Gateway", "Kong / Envoy", "Auth (JWT), routing, rate limiting, region-aware proxy", $tags="gateway")
+    Container(gru_services, "Domain Services", "K8s (3 AZ)", "Booking, Driver, Pricing, Payments, Geography, Notification, Fraud", $tags="services")
+}
+
+System_Boundary(fra_region, "Frankfurt Region (FRA)") {
+    Container(fra_gw, "API Gateway", "Kong / Envoy", "Auth (JWT), routing, rate limiting", $tags="gateway")
+    Container(fra_services, "Control Plane + Domain Services", "K8s (3 AZ)", "Identity, Analytics, Reference Data, + standby Domain Services", $tags="services")
+}
+
+' ========== USER -> GEODNS ==========
+Rel(user_sea, geodns, "api.gofuture.com DNS lookup", $tags="sea_traffic")
+Rel(user_idn, geodns, "api.gofuture.com DNS lookup", $tags="sea_traffic")
+Rel(user_sa, geodns, "api.gofuture.com DNS lookup", $tags="sa_traffic")
+Rel(user_eu, geodns, "api.gofuture.com DNS lookup", $tags="eu_traffic")
+
+' ========== GEODNS -> DDOS -> WAF ==========
+Rel(geodns, ddos, "Resolve to nearest regional Anycast IP", $tags="internal")
+Rel(ddos, waf_edge, "Clean L3/L4 traffic", $tags="internal")
+
+' ========== WAF -> REGIONAL GATEWAYS (normal flow) ==========
+Rel(waf_edge, sgp_gw, "SEA traffic (~5 мс)", $tags="sea_traffic")
+Rel(waf_edge, jkt_gw, "Indonesia traffic (~10 мс)", $tags="sea_traffic")
+Rel(waf_edge, gru_gw, "SA traffic (~5 мс)", $tags="sa_traffic")
+Rel(waf_edge, fra_gw, "EU traffic (~5 мс)", $tags="eu_traffic")
+
+' ========== FAILOVER PATHS ==========
+Rel(waf_edge, jkt_gw, "SGP failure -> failover to JKT", $tags="failover")
+Rel(waf_edge, sgp_gw, "JKT failure -> failover to SGP", $tags="failover")
+Rel(waf_edge, fra_gw, "GRU failure -> failover to FRA", $tags="failover")
+
+' ========== GATEWAY -> SERVICES ==========
+Rel(sgp_gw, sgp_services, "REST/gRPC (mTLS)", $tags="internal")
+Rel(jkt_gw, jkt_services, "REST/gRPC (mTLS)", $tags="internal")
+Rel(gru_gw, gru_services, "REST/gRPC (mTLS)", $tags="internal")
+Rel(fra_gw, fra_services, "REST/gRPC (mTLS)", $tags="internal")
+
+SHOW_LEGEND()
+
+@enduml
