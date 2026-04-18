@@ -1,0 +1,103 @@
+@startuml tenant_data_isolation
+!include https://raw.githubusercontent.com/plantuml-stdlib/C4-PlantUML/master/C4_Container.puml
+
+title GoFuture - Модель изоляции данных между тенантами (Hybrid Isolation)
+
+AddElementTag("enterprise", $bgColor="#E74C3C", $fontColor="white", $legendText="Enterprise Tier (Physical Isolation)")
+AddElementTag("business", $bgColor="#E67E22", $fontColor="white", $legendText="Business Tier (RLS Isolation)")
+AddElementTag("standard", $bgColor="#F4D03F", $fontColor="black", $legendText="Standard Tier (RLS Isolation)")
+AddElementTag("shared", $bgColor="#2E86C1", $fontColor="white", $legendText="Shared Infrastructure")
+AddElementTag("middleware", $bgColor="#8E44AD", $fontColor="white", $legendText="Tenant Middleware")
+
+AddRelTag("enterprise_flow", $lineColor="#E74C3C", $textColor="#E74C3C")
+AddRelTag("business_flow", $lineColor="#E67E22", $textColor="#E67E22")
+AddRelTag("shared_flow", $lineColor="#2C3E50", $textColor="#2C3E50")
+
+' ========== REQUEST FLOW ==========
+
+Person(user_ent, "Пользователь Enterprise-партнера", "JWT: tenant_id=airline-xyz tier=enterprise")
+Person(user_biz, "Пользователь Business-партнера", "JWT: tenant_id=hotel-abc tier=business")
+Person(user_std, "Пользователь Standard-партнера", "JWT: tenant_id=corp-def tier=standard")
+
+' ========== API GATEWAY + MIDDLEWARE ==========
+
+System_Boundary(gateway_layer, "API Gateway + Tenant Middleware") {
+    Container(api_gw, "API Gateway", "Kong / Envoy", "1. JWT validation 2. Extract tenant_id 3. Check OPA policy 4. Rate limit (per tenant) 5. Set tenant context    in request headers", $tags="middleware")
+    Container(tenant_mw, "Tenant Context Middleware", "Service Sidecar", "В каждом сервисе: 1. Read tenant_id    from header 2. SET app.current_tenant_id    (PostgreSQL) 3. SET key prefix    (Redis) 4. SET header    (Kafka produce)", $tags="middleware")
+}
+
+' ========== COMPUTE LAYER ==========
+
+System_Boundary(compute, "Compute Layer (Kubernetes)") {
+    Container(ns_enterprise, "Dedicated Namespace (Enterprise)", "K8s Namespace", "tenant-airline-xyz Resource quotas: CPU: 8 cores Mem: 16 GB Pod anti-affinity Network Policy: isolated", $tags="enterprise")
+    Container(ns_shared, "Shared Namespace (Business + Standard)", "K8s Namespace", "gofuture-services Shared pods. Tenant context от middleware. Resource limits per request", $tags="shared")
+}
+
+' ========== DATABASE LAYER ==========
+
+System_Boundary(db_layer, "Database Layer (PostgreSQL)") {
+    ContainerDb(db_ent_schema, "Dedicated Schema (Enterprise)", "PostgreSQL", "CREATE SCHEMA tenant_airline_xyz;  Все таблицы в отдельной схеме. search_path = tenant_airline_xyz.  Отдельный PgBouncer connection pool. Dedicated backup policy", $tags="enterprise")
+    ContainerDb(db_shared_rls, "Shared Tables + Row-Level Security (Business + Standard)", "PostgreSQL + RLS", "ALTER TABLE bookings ENABLE ROW LEVEL SECURITY;  CREATE POLICY tenant_iso ON bookings USING (tenant_id = current_setting( 'app.current_tenant_id'));  PgBouncer: per-tenant connection pool limit", $tags="shared")
+}
+
+' ========== CACHE LAYER ==========
+
+System_Boundary(cache_layer, "Cache Layer (Redis)") {
+    ContainerDb(redis_ent, "Dedicated Redis Namespace (Enterprise)", "Redis", "DB index: 1 (airline-xyz)  Dedicated memory: 2 GB reserved. Separate eviction policy", $tags="enterprise")
+    ContainerDb(redis_shared, "Shared Redis + Key Prefix (Business + Standard)", "Redis Cluster", "Key format: {tenant_id}:cache:* {tenant_id}:session:*  TTL per tenant config. Max memory per tenant (maxmemory-policy)", $tags="shared")
+}
+
+' ========== KAFKA LAYER ==========
+
+System_Boundary(kafka_layer, "Event Layer (Kafka)") {
+    ContainerQueue(kafka_topics, "Shared Kafka Topics", "Apache Kafka", "Header: tenant_id Payload: tenant_id  All tiers share topics.  Enterprise: - Dedicated consumer   group с гарантированным   throughput. - Producer/consumer quota.  Business/Standard: - Shared consumer groups. - Фильтрация по   tenant_id в consumer", $tags="shared")
+}
+
+' ========== STORAGE LAYER ==========
+
+System_Boundary(storage_layer, "Data Lake (S3 + Iceberg)") {
+    ContainerDb(s3_partitioned, "S3 Tenant Partitions", "S3 + Iceberg", "s3://data-lake/   raw/     tenant_id=airline-xyz/     tenant_id=hotel-abc/     tenant_id=corp-def/  IAM Policy per prefix: airline-xyz role ->   s3://…/tenant_id=     airline-xyz/*  Physical file isolation. Separate compaction", $tags="shared")
+}
+
+' ========== MONITORING ==========
+
+System_Boundary(monitoring_layer, "Tenant Monitoring") {
+    Container(metrics, "Prometheus (per-tenant labels)", "Prometheus", "Per-tenant labels: tenant_id, service. Noisy neighbor detection: alert when tenant usage exceeds fair_share", $tags="shared")
+    Container(dashboards, "Grafana (per-tenant dashboards)", "Grafana", "Enterprise: dedicated dashboard with full metrics.  Business/Standard: shared template filtered by tenant_id", $tags="shared")
+}
+
+' ========== CONNECTIONS ==========
+
+' User -> Gateway
+Rel(user_ent, api_gw, "JWT (enterprise)", $tags="enterprise_flow")
+Rel(user_biz, api_gw, "JWT (business)", $tags="business_flow")
+Rel(user_std, api_gw, "JWT (standard)", $tags="shared_flow")
+
+' Gateway -> Middleware -> Compute
+Rel(api_gw, tenant_mw, "tenant_id + tier in context")
+Rel(tenant_mw, ns_enterprise, "Enterprise requests -> dedicated namespace", $tags="enterprise_flow")
+Rel(tenant_mw, ns_shared, "Business/Standard -> shared pods", $tags="business_flow")
+
+' Compute -> Database
+Rel(ns_enterprise, db_ent_schema, "search_path = tenant_airline_xyz", $tags="enterprise_flow")
+Rel(ns_shared, db_shared_rls, "SET current_tenant_id -> RLS filter", $tags="business_flow")
+
+' Compute -> Cache
+Rel(ns_enterprise, redis_ent, "Dedicated DB index", $tags="enterprise_flow")
+Rel(ns_shared, redis_shared, "{tenant_id}:key", $tags="business_flow")
+
+' Compute -> Kafka
+Rel(ns_enterprise, kafka_topics, "Produce + tenant_id header", $tags="enterprise_flow")
+Rel(ns_shared, kafka_topics, "Produce + tenant_id header", $tags="business_flow")
+
+' Kafka -> S3
+Rel(kafka_topics, s3_partitioned, "Flink Writer: partition by tenant_id")
+
+' Monitoring
+Rel(ns_enterprise, metrics, "Metrics: tenant_id label", $tags="enterprise_flow")
+Rel(ns_shared, metrics, "Metrics: tenant_id label", $tags="business_flow")
+Rel(metrics, dashboards, "PromQL filtered by tenant_id")
+
+SHOW_LEGEND()
+
+@enduml

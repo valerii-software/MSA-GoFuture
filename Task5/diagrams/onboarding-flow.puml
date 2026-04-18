@@ -1,0 +1,114 @@
+@startuml onboarding_flow
+!include https://raw.githubusercontent.com/plantuml-stdlib/C4-PlantUML/master/C4_Container.puml
+
+title GoFuture - Процесс онбординга нового партнера (Tenant Provisioning Flow)
+
+' Use sequence diagram for process flow
+skinparam sequenceArrowThickness 2
+skinparam sequenceParticipantBorderColor #2C3E50
+skinparam sequenceLifeLineBorderColor #7F8C8D
+skinparam sequenceGroupBorderColor #2E86C1
+skinparam noteBackgroundColor #FCF3CF
+
+actor "Партнер (partner_owner)" as Partner
+participant "Partner Portal" as Portal #85C1E9
+participant "Tenant Provisioning Service" as TPS #8E44AD
+participant "Keycloak (IdP)" as Keycloak #E74C3C
+database "Tenant Registry" as Registry #1A5276
+database "PostgreSQL" as DB #1A5276
+participant "Pricing Service" as Pricing #2E86C1
+participant "Notification Service" as Notif #2E86C1
+participant "Grafana" as Grafana #27AE60
+participant "API Gateway (Kong)" as Kong #E67E22
+
+== Шаг 1: Регистрация (5 мин) ==
+
+Partner -> Portal : Заполнить форму регистрации (название, контакты, tier, регион)
+Portal -> TPS : CreateTenantRequest {name, tier, region, admin_email}
+TPS -> Registry : INSERT tenant (status: PROVISIONING)
+TPS --> Portal : tenant_id + status: PROVISIONING
+
+== Шаг 2: KYC/KYB верификация (1-2 дня) ==
+
+note right of TPS
+  Полуавтоматическая проверка:
+  - API проверки (ЕГРЮЛ / Companies House)
+  - Ручной review Compliance team
+  - Результат: APPROVED / REJECTED
+end note
+
+TPS -> Registry : UPDATE status: KYC_PENDING
+TPS -> TPS : KYC API checks (автоматические)
+TPS -> TPS : Compliance review (ручной)
+TPS -> Registry : UPDATE status: KYC_APPROVED
+
+== Шаг 3: Договор и tier (1 день) ==
+
+TPS --> Partner : Email: KYC одобрен, подпишите договор
+Partner -> Portal : Подписать договор (DocuSign API)
+Portal -> TPS : ContractSigned {tier: Business, plan: standard_sea}
+TPS -> Registry : UPDATE tier, contract_id
+
+== Шаг 4: Automated Provisioning (< 10 мин) ==
+
+group Saga: Tenant Provisioning [Автоматическая, идемпотентная]
+
+    TPS -> Keycloak : 4.1 Create realm: tenant-{name} + Create roles: partner_owner, partner_admin, ... + Create admin user + Configure SSO broker (если указан IdP)
+    Keycloak --> TPS : realm_id, admin_user_id
+
+    TPS -> DB : 4.2 Provision database: [Business tier] CREATE RLS policy for tenant_id = {uuid} [Enterprise tier] CREATE SCHEMA tenant_{name}
+    DB --> TPS : schema/RLS ready
+
+    TPS -> Pricing : 4.3 Create pricing plan: default tariffs for region + surge settings + commission rate
+    Pricing --> TPS : pricing_plan_id
+
+    TPS -> Notif : 4.4 Create notification templates with branding: logo, colors, name
+    Notif --> TPS : templates_created
+
+    TPS -> Kong : 4.5 Create rate limit policy per tenant: {tier_limits} + API key generation
+    Kong --> TPS : api_key, rate_limit_id
+
+    TPS -> Grafana : 4.6 Provision monitoring: - Tenant dashboard (auto) - Alert rules (SLA thresholds) - Billing meter config
+    Grafana --> TPS : dashboard_url
+
+end
+
+TPS -> Registry : UPDATE status: PROVISIONED
+
+== Шаг 5: Sandbox (30 мин - 2 дня) ==
+
+TPS -> TPS : 5.1 Create sandbox: seed data (test drivers, zones)
+TPS --> Partner : Email: sandbox ready + API docs URL + sandbox API key + dashboard URL
+
+Partner -> Portal : 5.2 Configure SSO (upload IdP metadata or OIDC discovery URL)
+Portal -> Keycloak : Configure SSO broker + test connection
+Keycloak --> Portal : SSO verified
+
+Partner -> Portal : 5.3 Customize: branding, pricing, notification templates
+Portal -> TPS : UpdateTenantConfig
+
+note right of Partner
+  Партнер тестирует:
+  - API-интеграцию (sandbox)
+  - SSO login flow
+  - Создание тестовых поездок
+  - Проверку уведомлений
+end note
+
+TPS -> Registry : UPDATE status: SANDBOX
+
+== Шаг 6: Go-Live (5 мин) ==
+
+Partner -> Portal : Запросить активацию production
+TPS -> TPS : Pre-flight checks: - SSO configured? + - API tested? + - Contract signed? + - KYC approved? +
+TPS -> Kong : Switch API key: sandbox -> production
+TPS -> Registry : UPDATE status: ACTIVE
+TPS --> Partner : Email: Production активирован! 🎉 + Production API key + Support channel
+
+note right of TPS
+  SLA мониторинг активирован.
+  Billing metering начат.
+  Tenant dashboard: live data.
+end note
+
+@enduml
