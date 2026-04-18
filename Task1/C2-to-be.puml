@@ -1,0 +1,186 @@
+@startuml C2_ToBe_GoFuture_Microservices
+!include https://raw.githubusercontent.com/plantuml-stdlib/C4-PlantUML/master/C4_Container.puml
+
+title GoFuture - C2 To-Be: Целевая микросервисная архитектура
+
+' === ПОЛЬЗОВАТЕЛИ ===
+Person(passenger, "Пассажир", "Заказывает поездки")
+Person(driver, "Водитель", "Принимает заказы и получает выплаты")
+Person(manager, "Корпоративный менеджер", "Управляет счетами")
+Person(accountant, "Бухгалтер", "Контролирует выплаты")
+Person(dev_engineer, "Разработчик", "Разрабатывает сервисы")
+Person(sre_engineer, "SRE инженер", "Мониторит систему")
+
+' === КЛИЕНТСКИЕ ПРИЛОЖЕНИЯ ===
+System_Boundary(clients, "Клиентские приложения") {
+    Container(app_passenger, "Пассажирское приложение", "iOS/Android/Huawei", "Интерфейс для пассажиров")
+    Container(app_driver, "Водительское приложение", "iOS/Android/Huawei", "Интерфейс для водителей")
+    Container(web_portal, "Корпоративный портал", "React/Vue.js", "Управление заказами и отчеты")
+    Container(admin_portal, "Админ-панель", "React", "Управление платформой")
+}
+
+' === ИНФРАСТРУКТУРНЫЙ СЛОЙ ===
+System_Boundary(infra_layer, "Инфраструктурный слой") {
+    Container(api_gateway, "API Gateway", "Kong / Envoy", "Маршрутизация, rate limiting, API versioning, canary routing")
+    Container(identity_service, "Identity Service", "OAuth 2.0 / JWT", "Аутентификация, авторизация, мультитенантность")
+}
+
+' === ДОМЕННЫЕ СЕРВИСЫ ===
+System_Boundary(domain_services, "Доменные сервисы") {
+    Container(booking_service, "Booking Service", "Python / Go", "Управление жизненным циклом поездки")
+    Container(driver_service, "Driver Service", "Python / Go", "Профили, статусы, matching водителей")
+    Container(pricing_service, "Pricing Service", "Python / Go", "Динамическое ценообразование, surge pricing")
+    Container(payments_service, "Payments Service", "Python / Go", "Платежи, возвраты, выплаты водителям")
+    Container(notification_service, "Notification Service", "Python / Go", "Push, SMS, Email уведомления")
+    Container(geography_service, "Geography Service", "Python / Go", "Геокодирование, маршруты, ETA, геопоиск водителей")
+    Container(analytics_service, "Analytics Service", "Python / Spark / Flink", "Аналитика, ML-прогнозы, BI-отчеты")
+    Container(fraud_service, "Fraud Service", "Python / Go", "Обнаружение мошенничества, ML-модели, risk scoring")
+}
+
+' === БАЗЫ ДАННЫХ (Database per Service) ===
+System_Boundary(databases, "Базы данных (Database per Service)") {
+    ContainerDb(db_booking, "Booking DB", "PostgreSQL", "bookings, trip_statuses, trip_history")
+    ContainerDb(db_driver, "Driver DB", "PostgreSQL", "drivers, profiles, ratings, documents")
+    ContainerDb(db_pricing, "Pricing DB", "PostgreSQL", "pricing_rules, tariffs, surge_zones")
+    ContainerDb(db_payments, "Payments DB", "PostgreSQL (PCI DSS)", "payments, transactions, payouts, balances")
+    ContainerDb(db_notification, "Notification DB", "PostgreSQL", "templates, device_tokens, preferences")
+    ContainerDb(db_geography, "Geography DB", "PostgreSQL (PostGIS)", "geo_zones, geo_regions")
+    ContainerDb(db_fraud, "Fraud DB", "PostgreSQL", "fraud_rules, scores, blacklists")
+    ContainerDb(db_identity, "Identity DB", "PostgreSQL", "users, roles, permissions, tenants")
+}
+
+' === КЕШИРОВАНИЕ И ПОИСК ===
+System_Boundary(cache_search, "Кеширование и поиск") {
+    ContainerDb(redis_pricing, "Pricing Cache", "Redis", "Кеш ценовых правил")
+    ContainerDb(redis_geo, "Geo Cache", "Redis", "Кеш геоданных и позиций водителей")
+    ContainerDb(elasticsearch, "Driver Locations", "Elasticsearch", "Геоиндекс позиций водителей")
+}
+
+' === СОБЫТИЙНАЯ ШИНА ===
+System_Boundary(event_infra, "Событийная инфраструктура") {
+    ContainerQueue(kafka, "Event Bus", "Apache Kafka", "Доменные события между сервисами")
+    Container(schema_registry, "Schema Registry", "Confluent / Apicurio", "Версионирование схем событий (Avro/Protobuf)")
+}
+
+' === МОНИТОРИНГ И OBSERVABILITY ===
+System_Boundary(observability, "Observability") {
+    Container(prometheus, "Prometheus", "Monitoring", "Сбор метрик")
+    Container(grafana, "Grafana", "Dashboard", "Визуализация метрик")
+    Container(tempo, "Tempo / Jaeger", "Distributed Tracing", "Трассировка запросов")
+    Container(loki, "Loki", "Log Aggregation", "Централизованные логи")
+    Container(alertmanager, "Alertmanager", "Alert System", "Алертинг")
+}
+
+' === CI/CD ===
+System_Boundary(cicd, "CI/CD") {
+    Container(cicd_server, "CI/CD Pipeline", "GitLab CI / GitHub Actions", "Сборка, тесты, деплой каждого сервиса отдельно")
+    Container(k8s, "Kubernetes", "Container Orchestration", "Оркестрация, автоскейлинг, Service Mesh (Istio)")
+    Container(registry, "Container Registry", "Docker Registry", "Хранение образов сервисов")
+}
+
+' === АНАЛИТИКА ===
+System_Boundary(analytics_infra, "Аналитическая инфраструктура") {
+    ContainerDb(clickhouse, "Analytics DB", "ClickHouse", "Аналитические данные")
+    Container(datalens, "DataLens", "BI Tool", "Бизнес-отчеты")
+}
+
+' === ВНЕШНИЕ СИСТЕМЫ ===
+System_Ext(yandex_pay, "Яндекс Пэй", "Платежный шлюз")
+System_Ext(yandex_maps, "Яндекс Карты", "Картографический сервис")
+System_Ext(fcm, "FCM", "Push-сервис Google")
+System_Ext(apns, "APNs", "Push-сервис Apple")
+System_Ext(huawei_push, "Huawei Push Kit", "Push-сервис Huawei")
+System_Ext(bank_api, "API Банка", "Банковские выплаты")
+
+' ========== СВЯЗИ ==========
+
+' --- Пользователи -> Клиенты ---
+Rel(passenger, app_passenger, "Использует")
+Rel(driver, app_driver, "Использует")
+Rel(manager, web_portal, "Использует")
+Rel(accountant, admin_portal, "Использует")
+Rel(dev_engineer, cicd_server, "Запускает пайплайны")
+Rel(sre_engineer, grafana, "Мониторит систему")
+
+' --- Клиенты -> API Gateway ---
+Rel(app_passenger, api_gateway, "REST API (HTTPS)")
+Rel(app_driver, api_gateway, "REST API (HTTPS)")
+Rel(web_portal, api_gateway, "REST API (HTTPS)")
+Rel(admin_portal, api_gateway, "REST API (HTTPS)")
+
+' --- API Gateway -> Identity + Сервисы ---
+Rel(api_gateway, identity_service, "Валидация JWT")
+Rel(api_gateway, booking_service, "REST/gRPC")
+Rel(api_gateway, driver_service, "REST/gRPC")
+Rel(api_gateway, pricing_service, "REST/gRPC")
+Rel(api_gateway, payments_service, "REST/gRPC")
+Rel(api_gateway, notification_service, "REST/gRPC")
+Rel(api_gateway, geography_service, "REST/gRPC")
+Rel(api_gateway, analytics_service, "REST/gRPC")
+
+' --- Синхронные вызовы между сервисами (критический путь) ---
+Rel(booking_service, pricing_service, "Расчет цены", "gRPC")
+Rel(booking_service, geography_service, "Маршрут и ETA", "gRPC")
+Rel(booking_service, driver_service, "Назначение водителя", "gRPC")
+Rel(booking_service, fraud_service, "Проверка заказа", "gRPC")
+Rel(payments_service, fraud_service, "Проверка транзакции", "gRPC")
+Rel(driver_service, geography_service, "Позиции водителей", "gRPC")
+Rel(pricing_service, geography_service, "Расстояние/время", "gRPC")
+
+' --- Сервисы -> свои БД ---
+Rel(booking_service, db_booking, "SQL", "ORM")
+Rel(driver_service, db_driver, "SQL", "ORM")
+Rel(pricing_service, db_pricing, "SQL", "ORM")
+Rel(payments_service, db_payments, "SQL", "ORM")
+Rel(notification_service, db_notification, "SQL", "ORM")
+Rel(geography_service, db_geography, "SQL", "ORM")
+Rel(fraud_service, db_fraud, "SQL", "ORM")
+Rel(identity_service, db_identity, "SQL", "ORM")
+
+' --- Кеширование и поиск ---
+Rel(pricing_service, redis_pricing, "Кеш тарифов")
+Rel(geography_service, redis_geo, "Кеш геоданных")
+Rel(geography_service, elasticsearch, "Геопоиск водителей")
+
+' --- Событийная шина (Kafka) ---
+Rel(booking_service, kafka, "BookingCreated, TripCompleted...", "Publish")
+Rel(driver_service, kafka, "DriverAssigned, LocationUpdated...", "Publish")
+Rel(pricing_service, kafka, "PriceCalculated, SurgeUpdated...", "Publish")
+Rel(payments_service, kafka, "PaymentCompleted, PayoutCompleted...", "Publish")
+
+Rel(kafka, notification_service, "Триггеры уведомлений", "Subscribe")
+Rel(kafka, analytics_service, "Все бизнес-события", "Subscribe")
+Rel(kafka, payments_service, "TripCompleted -> платеж", "Subscribe")
+Rel(kafka, fraud_service, "События для ML-модели", "Subscribe")
+Rel(kafka, pricing_service, "События для surge-модели", "Subscribe")
+
+Rel(kafka, schema_registry, "Валидация схем")
+
+' --- Внешние интеграции ---
+Rel(payments_service, yandex_pay, "Процессинг платежей", "REST API")
+Rel(payments_service, bank_api, "Банковские выплаты", "REST API")
+Rel(geography_service, yandex_maps, "Геоданные и маршруты", "REST API")
+Rel(notification_service, fcm, "Push Android", "REST API")
+Rel(notification_service, apns, "Push iOS", "REST API")
+Rel(notification_service, huawei_push, "Push Huawei", "REST API")
+
+' --- Observability ---
+Rel(k8s, prometheus, "Метрики сервисов", "Prometheus scrape")
+Rel(prometheus, grafana, "Данные для дашбордов", "PromQL")
+Rel(prometheus, alertmanager, "Алерты", "Alert Rules")
+Rel(k8s, loki, "Логи контейнеров", "Structured JSON")
+Rel(k8s, tempo, "Трейсы (OpenTelemetry)", "OTLP")
+Rel(tempo, grafana, "Визуализация трейсов")
+Rel(loki, grafana, "Визуализация логов")
+
+' --- CI/CD ---
+Rel(cicd_server, registry, "Push образов")
+Rel(cicd_server, k8s, "Deploy сервисов", "kubectl/Helm")
+
+' --- Аналитика ---
+Rel(analytics_service, clickhouse, "Запись аналитики", "Kafka Engine / ETL")
+Rel(clickhouse, datalens, "BI-отчеты", "SQL")
+Rel(datalens, manager, "Бизнес-отчеты")
+Rel(datalens, accountant, "Финансовые отчеты")
+
+@enduml

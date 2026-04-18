@@ -1,0 +1,53 @@
+@startuml Migration_Phases
+!theme plain
+
+title GoFuture - Четырехфазная стратегия миграции данных
+
+|Фаза 1: Подготовка|
+start
+:Создание новой БД сервиса;
+:Развертывание схемы и индексов;
+:Настройка Debezium CDC;
+
+|Фаза 2: Полная миграция (bulk)|
+:pg_dump / COPY исторических данных;
+:Batch-копирование по 1M записей;
+:Верификация каждого batch
+(row count + checksum);
+note right
+  Для финансовых данных:
+  sum(amount) за каждый день
+  совпадает до копейки
+end note
+
+|Фаза 3: Синхронизация (CDC)|
+:Включение Debezium CDC;
+:WAL -> Kafka -> Consumer -> Новая БД;
+:Мониторинг lag CDC (< 5 сек);
+note right
+  Idempotent upsert
+  для дедупликации
+end note
+:Materialized View в монолитной БД
+(для зависимых компонентов);
+
+|Фаза 4: Переключение (cutover)|
+:Canary: 5% -> 25% -> 50% -> 100%;
+:Мониторинг: error rate, latency,
+бизнес-метрики;
+if (Ошибки > порог?) then (да)
+  :Автоматический откат
+  через API Gateway;
+  stop
+else (нет)
+  :Новый сервис - source of truth;
+  :Dual-write период (обратная CDC);
+  :Мониторинг 72 часа;
+  :Отключение CDC и
+  materialized views;
+  :Монолит в read-only (2 нед);
+  :Полная деkomission;
+  stop
+endif
+
+@enduml

@@ -1,0 +1,52 @@
+@startuml Service_Interaction
+!include https://raw.githubusercontent.com/plantuml-stdlib/C4-PlantUML/master/C4_Container.puml
+
+title GoFuture - Схема взаимодействия доменных сервисов
+
+Container(api_gw, "API Gateway", "Kong / Envoy", "Единая точка входа")
+
+Container(booking, "Booking Service", "", "Жизненный цикл поездки")
+Container(driver, "Driver Service", "", "Профили, matching водителей")
+Container(payments, "Payments Service", "", "Платежи и выплаты")
+Container(pricing, "Pricing Service", "", "Динамическое ценообразование")
+Container(fraud, "Fraud Service", "", "Обнаружение мошенничества")
+Container(geography, "Geography Service", "", "Геокодирование, маршруты, ETA")
+Container(notification, "Notification Service", "", "Push, SMS, Email")
+Container(analytics, "Analytics Service", "", "Аналитика, ML, BI")
+
+ContainerQueue(kafka, "Event Bus", "Apache Kafka", "Доменные события")
+
+System_Ext(fcm, "FCM", "Push Google")
+System_Ext(apns, "APNs", "Push Apple")
+System_Ext(huawei, "Huawei Push Kit", "Push Huawei")
+
+' --- API Gateway -> Сервисы ---
+Rel_D(api_gw, booking, "REST/gRPC")
+Rel_D(api_gw, driver, "REST/gRPC")
+Rel_D(api_gw, payments, "REST/gRPC")
+
+' --- Sync-вызовы (критический путь) ---
+Rel(booking, pricing, "Расчет цены", "sync gRPC")
+Rel(booking, geography, "Маршрут и ETA", "sync gRPC")
+Rel(booking, driver, "Назначение водителя", "sync gRPC")
+Rel(booking, fraud, "Проверка заказа", "sync gRPC")
+Rel(payments, fraud, "Проверка транзакции", "sync gRPC")
+Rel(driver, geography, "Позиции водителей", "sync gRPC")
+Rel(pricing, geography, "Расстояние/время", "sync gRPC")
+
+' --- Async (Kafka) ---
+Rel(booking, kafka, "BookingCreated, TripCompleted...", "publish")
+Rel(driver, kafka, "DriverAssigned, LocationUpdated...", "publish")
+Rel(pricing, kafka, "PriceCalculated, SurgeUpdated...", "publish")
+Rel(payments, kafka, "PaymentCompleted, PayoutCompleted...", "publish")
+
+Rel(kafka, notification, "Триггеры уведомлений", "subscribe")
+Rel(kafka, analytics, "Все бизнес-события", "subscribe")
+Rel(kafka, payments, "TripCompleted -> платеж", "subscribe")
+
+' --- Notification -> External ---
+Rel(notification, fcm, "Push Android", "REST")
+Rel(notification, apns, "Push iOS", "REST")
+Rel(notification, huawei, "Push Huawei", "REST")
+
+@enduml
