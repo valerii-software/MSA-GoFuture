@@ -1,0 +1,117 @@
+@startuml data_quality_pipeline
+!include https://raw.githubusercontent.com/plantuml-stdlib/C4-PlantUML/master/C4_Container.puml
+
+title GoFuture - Пайплайн контроля качества данных (5 уровней)
+
+AddElementTag("level1", $bgColor="#2E86C1", $fontColor="white")
+AddElementTag("level2", $bgColor="#8E44AD", $fontColor="white")
+AddElementTag("level3", $bgColor="#27AE60", $fontColor="white")
+AddElementTag("level4", $bgColor="#E67E22", $fontColor="white")
+AddElementTag("level5", $bgColor="#C0392B", $fontColor="white")
+AddElementTag("data", $bgColor="#1A5276", $fontColor="white")
+AddElementTag("alert", $bgColor="#E74C3C", $fontColor="white")
+
+AddRelTag("pass", $lineColor="#27AE60", $textColor="#27AE60")
+AddRelTag("fail", $lineColor="#E74C3C", $lineStyle=DashedLine(), $textColor="#E74C3C")
+AddRelTag("flow", $lineColor="#2C3E50", $textColor="#2C3E50")
+AddRelTag("monitor", $lineColor="#8E44AD", $lineStyle=DottedLine(), $textColor="#8E44AD")
+
+' ========== DATA FLOW ==========
+
+Container(producer, "Микросервис (Producer)", "Booking / Driver / Payments / ...", "Генерирует доменные события", $tags="data")
+
+' ========== LEVEL 1: Schema Validation ==========
+System_Boundary(level1, "Уровень 1: Schema Validation (на входе)") {
+    Container(schema_registry, "Schema Registry", "Confluent / Apicurio", "Avro-схемы событий. Backward compatibility. Типы, NOT NULL, Enum. Регистрация при деплое", $tags="level1")
+}
+
+' ========== LEVEL 2: Data Contracts ==========
+System_Boundary(level2, "Уровень 2: Data Contracts (между командами)") {
+    Container(contracts, "Data Contracts", "YAML + Git + CI/CD", "Формализованные контракты: SLA (freshness, completeness), semantic rules (price > 0), consumer registry. CI проверка при деплое", $tags="level2")
+}
+
+ContainerQueue(kafka, "Apache Kafka", "Event Bus", "Валидированные события", $tags="data")
+
+' ========== LEVEL 3a: Stream DQ ==========
+System_Boundary(level3_stream, "Уровень 3a: Real-time Quality Checks (Flink)") {
+    Container(flink_dq, "Flink DQ Processor", "Flink (inline)", "Range checks: price > 0, lat ∈ [-90,90]. Null checks: booking_id. Timestamp: not from future. Volume: events/min baseline. Latency < 1 мс per event", $tags="level3")
+    ContainerQueue(dlq, "DLQ", "Kafka", "Невалидные события (для расследования)", $tags="alert")
+}
+
+' ========== STORAGE ==========
+
+ContainerDb(iceberg, "Data Lake (S3 + Iceberg)", "Storage", "raw/ -> processed/ -> training/", $tags="data")
+
+ContainerDb(clickhouse, "ClickHouse", "Analytical DB", "BI-ready агрегации", $tags="data")
+
+ContainerDb(feature_store, "Feature Store", "Redis + Iceberg", "Online + Offline ML-фичи", $tags="data")
+
+' ========== LEVEL 3b: Batch DQ ==========
+System_Boundary(level3_batch, "Уровень 3b: Batch Quality Checks (Spark + Great Expectations)") {
+    Container(gx_checks, "Great Expectations", "Spark + GX", "Каждые 6 часов.  Completeness: NULL < 0.1%. Freshness: data age < 6h. Validity: semantic rules. Uniqueness: event_id unique. Consistency: payments ≈ trips. Distribution: avg ± 3σ. Volume: count ± 50% baseline", $tags="level3")
+}
+
+' ========== LEVEL 4: Lineage ==========
+System_Boundary(level4, "Уровень 4: Data Lineage (OpenLineage)") {
+    Container(openlineage, "OpenLineage + Marquez", "Lineage Server", "Отслеживание происхождения: Kafka topic -> Flink job -> Iceberg table -> Spark job -> ClickHouse / ML model.  Root cause analysis. Impact analysis. Compliance audit", $tags="level4")
+}
+
+' ========== LEVEL 5: ML Data Quality ==========
+System_Boundary(level5, "Уровень 5: ML Data Quality (Evidently AI)") {
+    Container(evidently, "Evidently AI", "ML Monitoring", "Feature drift detection. Prediction drift. Label drift. Train-serve skew.  Ежечасно (online features). При каждом деплое модели", $tags="level5")
+}
+
+' ========== MONITORING ==========
+System_Boundary(monitoring, "Мониторинг качества данных") {
+    Container(dq_metrics, "DQ Metrics", "Prometheus", "data_quality_score, completeness, freshness_seconds, validity_rate, volume_anomaly, feature_drift_score", $tags="alert")
+    Container(dq_grafana, "DQ Dashboard", "Grafana", "Data Platform Health: DQ score по dataset-ам, alert history, lineage graph, ML model health", $tags="alert")
+    Container(dq_alert, "DQ Alerts", "Alertmanager", "DQ score < 0.9 -> P1 DQ score < 0.95 -> P2 Drift > 0.2 -> P2 Freshness > 60s -> P2 Volume anomaly -> P2", $tags="alert")
+}
+
+Container(ml_training, "Model Training (Spark + MLflow)", "ML Pipeline", "Получает только валидированные данные. Блокируется при DQ score < 0.9", $tags="data")
+
+' ========== FLOW: Producer -> Level 1 -> Level 2 -> Kafka ==========
+
+Rel(producer, schema_registry, "1. Validate schema (serialize Avro)", $tags="flow")
+Rel(schema_registry, contracts, "2. Check against data contract SLA", $tags="flow")
+Rel(contracts, kafka, "3. Publish to Kafka topic", $tags="pass")
+
+' ========== FLOW: Kafka -> Level 3a (stream) ==========
+
+Rel(kafka, flink_dq, "4. Inline DQ checks (real-time)", $tags="flow")
+Rel(flink_dq, iceberg, "Valid events -> Data Lake", $tags="pass")
+Rel(flink_dq, clickhouse, "Aggregated -> ClickHouse", $tags="pass")
+Rel(flink_dq, feature_store, "Features -> Online Store", $tags="pass")
+Rel(flink_dq, dlq, "Invalid events -> DLQ", $tags="fail")
+Rel(flink_dq, dq_metrics, "Stream DQ metrics", $tags="monitor")
+
+' ========== FLOW: Storage -> Level 3b (batch) ==========
+
+Rel(iceberg, gx_checks, "5. Batch DQ checks (every 6h)", $tags="flow")
+Rel(gx_checks, dq_metrics, "GX results: pass/fail per expectation", $tags="monitor")
+
+' ========== FLOW: Level 4 (lineage) ==========
+
+Rel(flink_dq, openlineage, "Lineage events (stream jobs)", $tags="monitor")
+Rel(gx_checks, openlineage, "Lineage events (batch jobs)", $tags="monitor")
+Rel(ml_training, openlineage, "Lineage events (ML training)", $tags="monitor")
+
+' ========== FLOW: Level 5 (ML DQ) ==========
+
+Rel(feature_store, evidently, "Feature values (online + offline)", $tags="flow")
+Rel(ml_training, evidently, "Predictions + ground truth", $tags="flow")
+Rel(evidently, dq_metrics, "Drift scores, skew detection", $tags="monitor")
+
+' ========== FLOW: DQ -> Monitoring ==========
+
+Rel(dq_metrics, dq_grafana, "PromQL queries")
+Rel(dq_metrics, dq_alert, "Alert rules")
+
+' ========== FLOW: DQ gate -> ML Training ==========
+
+Rel(gx_checks, ml_training, "DQ PASS -> allow training", $tags="pass")
+Rel(gx_checks, ml_training, "DQ FAIL -> block training", $tags="fail")
+
+SHOW_LEGEND()
+
+@enduml
