@@ -1,0 +1,52 @@
+@startuml Outbox_Pattern
+title Transactional Outbox Pattern + Idempotent Consumer
+
+participant "Бизнес-логика сервиса" as service
+database "БД сервиса (PostgreSQL)" as db
+participant "Debezium CDC (Kafka Connect)" as debezium
+queue "Kafka Topic" as kafka
+participant "Consumer" as consumer
+database "БД consumer (PostgreSQL)" as consumer_db
+
+== Publish: Outbox Pattern ==
+
+service -> db: BEGIN transaction
+activate db
+service -> db: INSERT INTO bookings (...)
+service -> db: INSERT INTO outbox_events (event_id, type, topic, payload)
+service -> db: COMMIT
+deactivate db
+note right of db
+  Атомарность:
+  бизнес-данные + событие
+  в одной транзакции
+end note
+
+db -> debezium: WAL (logical replication)
+activate debezium
+debezium -> kafka: Publish event (из outbox_events)
+debezium -> db: UPDATE outbox_events SET status = 'PUBLISHED'
+deactivate debezium
+
+== Consume: Idempotent Consumer ==
+
+kafka -> consumer: Poll event
+activate consumer
+
+consumer -> consumer_db: SELECT FROM processed_events WHERE event_id = ?
+alt Событие уже обработано
+    consumer -> consumer: Skip (дубликат)
+    consumer -> kafka: ACK (commit offset)
+else Новое событие
+    consumer -> consumer_db: BEGIN transaction
+    activate consumer_db
+    consumer -> consumer_db: process_business_logic(event)
+    consumer -> consumer_db: INSERT INTO processed_events (event_id, consumer_group)
+    consumer -> consumer_db: COMMIT
+    deactivate consumer_db
+    consumer -> kafka: ACK (commit offset)
+end
+
+deactivate consumer
+
+@enduml

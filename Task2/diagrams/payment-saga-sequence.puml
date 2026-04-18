@@ -1,0 +1,63 @@
+@startuml Payment_Saga_Sequence
+title Payment Saga - Диаграмма последовательности
+
+participant "Kafka (TripCompleted)" as trigger
+participant "Payments Service (Orchestrator)" as payments #LightGreen
+participant "Fraud Service" as fraud
+participant "Яндекс Пэй" as yandex_pay
+participant "Notification Service" as notification
+
+trigger -> payments: TripCompleted event
+activate payments
+
+== Шаг 1: Инициация платежа ==
+payments -> payments: InitiatePaymentCmd (статус: PENDING)
+
+== Шаг 2: Проверка на фрод ==
+payments -> fraud: CheckPaymentFraudCmd
+activate fraud
+fraud --> payments: FraudCheckPassed
+deactivate fraud
+
+== Шаг 3: Списание с карты пассажира ==
+payments -> yandex_pay: ChargePassengerCmd (amount: 450₽)
+activate yandex_pay
+yandex_pay --> payments: PaymentCompleted
+deactivate yandex_pay
+
+== Шаг 4: Расчет заработка водителя ==
+payments -> payments: CalculateEarningsCmd (450₽ - 20% комиссия = 360₽)
+
+== Шаг 5: Зачисление на баланс водителя ==
+payments -> payments: CreditDriverBalanceCmd (+360₽ на баланс)
+
+== Шаг 6: Уведомление ==
+payments ->> notification: NotifyPaymentCmd
+activate notification
+notification --> notification: Push пассажиру: "Списано 450₽"
+notification --> notification: Push водителю: "Начислено 360₽"
+deactivate notification
+
+payments -> payments: PaymentSaga COMPLETED
+deactivate payments
+
+== Сценарий ошибки: Платежный шлюз ==
+
+note over payments, yandex_pay
+  При ChargeError:
+  Retry 3 раза (5s, 15s, 30s)
+  -> Если не удалось:
+    MarkPaymentPendingCmd
+    + Celery retry через 1 час
+end note
+
+== Сценарий ошибки: Фрод ==
+
+note over payments, fraud
+  При FraudDetected:
+  CancelPaymentCmd -> CANCELLED_FRAUD
+  + HoldBookingCmd -> расследование
+  + Notify -> "Платеж заблокирован"
+end note
+
+@enduml

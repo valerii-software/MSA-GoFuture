@@ -1,0 +1,73 @@
+@startuml Stream_Processors
+!include https://raw.githubusercontent.com/plantuml-stdlib/C4-PlantUML/master/C4_Container.puml
+
+title GoFuture - Flink Stream Processors и потоки данных
+
+' === KAFKA TOPICS (входные) ===
+ContainerQueue(topic_driver_loc, "driver.location. updates.v1", "Kafka", "128 партиций ~100K msg/s")
+ContainerQueue(topic_booking, "booking.trip. lifecycle.v1", "Kafka", "64 партиции ~5K msg/s")
+ContainerQueue(topic_driver_status, "driver.status. lifecycle.v1", "Kafka", "32 партиции")
+ContainerQueue(topic_geo_zone, "geography.zone. events.v1", "Kafka", "16 партиций")
+ContainerQueue(topic_payment, "payment.transaction. lifecycle.v1", "Kafka", "32 партиции")
+ContainerQueue(topic_demand, "pricing.demand. forecast.v1", "Kafka", "16 партиций")
+
+' === FLINK JOBS ===
+System_Boundary(flink, "Apache Flink Cluster") {
+    Container(geo_indexer, "GeoIndexer Job", "Flink Tumbling window 5s", "100K msg/s -> ES index + Redis + GeozoneEntered/Exited")
+    Container(surge_pricing, "Surge Pricing Job", "Flink Sliding window 5min/30s", "demand/supply ratio -> surge coefficient Latency: < 30s")
+    Container(smart_matching, "Smart Matching Job", "Flink Event-driven", "Оптимальный водитель (не ближайший) Latency: < 3s")
+    Container(fraud_detect, "Fraud Detection Job", "Flink Session window 5min", "Real-time fraud scoring на поведенческих паттернах")
+    Container(analytics_agg, "Analytics Aggregator", "Flink Tumbling window 1min", "Агрегация всех событий Batch insert каждые 10s")
+    Container(demand_forecast, "Demand Forecast Job", "Flink Tumbling window 5min", "ML-инференс: прогноз спроса на 15-30 мин")
+}
+
+' === ВЫХОДНЫЕ ХРАНИЛИЩА ===
+ContainerDb(elasticsearch, "Elasticsearch", "Геоиндекс", "Driver locations")
+ContainerDb(redis, "Redis", "Cache", "Surge per zone + позиции")
+ContainerDb(clickhouse, "ClickHouse", "Analytics", "Агрегированные метрики")
+
+' === ВЫХОДНЫЕ ТОПИКИ ===
+ContainerQueue(topic_pricing_out, "pricing.price. events.v1", "Kafka", "SurgeUpdated")
+ContainerQueue(topic_fraud_out, "fraud.check. events.v1", "Kafka", "FraudDetected")
+ContainerQueue(topic_driver_out, "driver.status. lifecycle.v1", "Kafka", "DriverAssigned")
+
+' === ВХОДНЫЕ СВЯЗИ ===
+Rel(topic_driver_loc, geo_indexer, "")
+Rel(topic_driver_loc, surge_pricing, "")
+Rel(topic_driver_loc, smart_matching, "")
+Rel(topic_driver_loc, fraud_detect, "")
+
+Rel(topic_booking, surge_pricing, "")
+Rel(topic_booking, smart_matching, "")
+Rel(topic_booking, fraud_detect, "")
+Rel(topic_booking, analytics_agg, "")
+Rel(topic_booking, demand_forecast, "")
+
+Rel(topic_driver_status, smart_matching, "")
+
+Rel(topic_geo_zone, surge_pricing, "")
+
+Rel(topic_payment, fraud_detect, "")
+Rel(topic_payment, analytics_agg, "")
+
+Rel(topic_demand, smart_matching, "")
+
+Rel(topic_driver_loc, demand_forecast, "")
+
+' === ВЫХОДНЫЕ СВЯЗИ ===
+Rel(geo_indexer, elasticsearch, "Upsert позиций (batch 5s)")
+Rel(geo_indexer, redis, "Кеш текущей позиции")
+Rel(geo_indexer, topic_geo_zone, "GeozoneEntered/Exited")
+
+Rel(surge_pricing, redis, "Surge coefficient")
+Rel(surge_pricing, topic_pricing_out, "SurgeUpdated")
+
+Rel(smart_matching, topic_driver_out, "DriverAssigned")
+
+Rel(fraud_detect, topic_fraud_out, "FraudDetected")
+
+Rel(analytics_agg, clickhouse, "Batch insert (every 10s)")
+
+Rel(demand_forecast, topic_demand, "DemandForecastUpdated")
+
+@enduml

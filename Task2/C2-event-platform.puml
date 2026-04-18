@@ -1,0 +1,171 @@
+@startuml C2_Event_Platform_GoFuture
+!include https://raw.githubusercontent.com/plantuml-stdlib/C4-PlantUML/master/C4_Container.puml
+
+title GoFuture - C2: Архитектура событийной платформы с мониторингом
+
+' === ДОМЕННЫЕ СЕРВИСЫ (Producers & Consumers) ===
+System_Boundary(domain_services, "Доменные сервисы") {
+    Container(booking_service, "Booking Service", "Python/Go", "Saga Orchestrator: Booking Saga  Publish: BookingCreated, TripCompleted Consume: DriverAssigned, PaymentCompleted")
+    Container(driver_service, "Driver Service", "Python/Go", "Publish: DriverOnline, DriverLocationUpdated, DriverAssigned Consume: BookingCreated")
+    Container(pricing_service, "Pricing Service", "Python/Go", "Publish: PriceCalculated, SurgeUpdated Consume: DemandForecast")
+    Container(payments_service, "Payments Service", "Python/Go", "Saga Orchestrator: Payment Saga, Payout Saga  Publish: PaymentCompleted, PayoutCompleted Consume: TripCompleted")
+    Container(notification_service, "Notification Service", "Python/Go", "Consume: все триггеры уведомлений Publish: NotificationSent")
+    Container(geography_service, "Geography Service", "Python/Go", "Publish: GeozoneEntered, GeozoneExited Consume: DriverLocation (через Flink)")
+    Container(fraud_service, "Fraud Service", "Python/Go", "Publish: FraudCheckPassed, FraudDetected Consume: saga commands")
+    Container(analytics_service, "Analytics Service", "Spark/Flink", "Consume: все бизнес- события Publish: DemandForecast, AnomalyDetected")
+}
+
+' === OUTBOX (в БД каждого сервиса) ===
+System_Boundary(outbox_layer, "Transactional Outbox (per service)") {
+    ContainerDb(outbox_booking, "Booking Outbox", "PostgreSQL table", "outbox_events + processed_events")
+    ContainerDb(outbox_payments, "Payments Outbox", "PostgreSQL table", "outbox_events + processed_events")
+    ContainerDb(outbox_driver, "Driver Outbox", "PostgreSQL table", "outbox_events + processed_events")
+}
+
+' === CDC LAYER ===
+System_Boundary(cdc_layer, "Change Data Capture") {
+    Container(debezium, "Debezium Connect", "Kafka Connect", "Читает WAL PostgreSQL, публикует outbox-события в Kafka-топики")
+}
+
+' === KAFKA CLUSTER ===
+System_Boundary(kafka_cluster, "Kafka Cluster (per region)") {
+
+    ContainerQueue(topic_booking, "booking.trip. lifecycle.v1", "Kafka Topic", "64 партиции Key: booking_id Retention: 7 дней")
+    ContainerQueue(topic_driver_loc, "driver.location. updates.v1", "Kafka Topic", "128 партиций Key: driver_id Retention: 1 час ~100K msg/s")
+    ContainerQueue(topic_driver_status, "driver.status. lifecycle.v1", "Kafka Topic", "32 партиции Key: driver_id Retention: 7 дней")
+    ContainerQueue(topic_pricing, "pricing.price. events.v1", "Kafka Topic", "32 партиции Key: booking_id/zone_id Retention: 7 дней")
+    ContainerQueue(topic_payment, "payment.transaction. lifecycle.v1", "Kafka Topic", "32 партиции Key: payment_id Retention: 30 дней")
+    ContainerQueue(topic_fraud, "fraud.check. events.v1", "Kafka Topic", "16 партиций Key: entity_id Retention: 7 дней")
+    ContainerQueue(topic_notification, "notification. delivery.events.v1", "Kafka Topic", "16 партиций Key: notification_id Retention: 3 дня")
+    ContainerQueue(topic_geo, "geography.zone. events.v1", "Kafka Topic", "16 партиций Key: driver_id Retention: 1 день")
+    ContainerQueue(topic_saga_booking, "saga.booking. commands/replies.v1", "Kafka Topic", "64 партиции Key: booking_id Retention: 3 дня")
+    ContainerQueue(topic_saga_payment, "saga.payment. commands/replies.v1", "Kafka Topic", "32 партиции Key: payment_id Retention: 3 дня")
+    ContainerQueue(topic_dlq, "*.dlq", "Kafka DLQ Topics", "4 партиции each Retention: 30 дней Алерт: > 0 msg")
+    ContainerQueue(topic_demand, "pricing.demand. forecast.v1", "Kafka Topic", "16 партиций Key: zone_id")
+
+    Container(schema_registry, "Schema Registry", "Confluent / Apicurio", "Avro-схемы событий, бэквард-совместимость, версионирование")
+}
+
+' === STREAM PROCESSORS (Flink) ===
+System_Boundary(flink_cluster, "Apache Flink Cluster") {
+    Container(flink_geo, "GeoIndexer Job", "Flink", "Input: driver.location Output: ES index + GeozoneEntered/Exited Window: tumbling 5s ~100K msg/s")
+    Container(flink_surge, "Surge Pricing Job", "Flink", "Input: driver.location + booking.lifecycle + zone.events Output: SurgeUpdated Window: sliding 5min/30s")
+    Container(flink_matching, "Smart Matching Job", "Flink", "Input: BookingCreated + driver.status + location + demand.forecast Output: DriverAssigned Latency: < 3s")
+    Container(flink_fraud, "Fraud Detection Job", "Flink", "Input: booking + payment + location events Output: FraudDetected Window: session 5min")
+    Container(flink_analytics, "Analytics Aggregator", "Flink", "Input: все бизнес-события Output: ClickHouse Window: tumbling 1min")
+}
+
+' === ХРАНИЛИЩА ===
+System_Boundary(storage, "Хранилища данных") {
+    ContainerDb(elasticsearch, "Driver Locations", "Elasticsearch", "Геоиндекс позиций водителей (real-time)")
+    ContainerDb(redis_surge, "Surge Cache", "Redis", "Текущий surge per zone + кеш позиций")
+    ContainerDb(clickhouse, "Analytics DB", "ClickHouse", "Агрегированные бизнес-метрики")
+    ContainerDb(saga_db, "Saga State DB", "PostgreSQL", "saga_instances + saga_step_log")
+}
+
+' === МОНИТОРИНГ И OBSERVABILITY ===
+System_Boundary(observability, "Observability Stack") {
+    Container(otel_collector, "OpenTelemetry Collector", "OTel Collector", "Сбор метрик, трейсов, логов от всех сервисов (OTel SDK -> OTLP)")
+    Container(kafka_exporter, "Kafka Exporter", "Prometheus Exporter", "Consumer lag, partition metrics, broker health")
+    Container(flink_metrics, "Flink Metrics Reporter", "Prometheus Reporter", "Job status, throughput, checkpoint, backpressure, latency")
+    Container(prometheus, "Prometheus", "TSDB", "Хранение метрик Retention: 30 дней Scrape: 15s interval")
+    Container(tempo, "Grafana Tempo", "Distributed Tracing", "Сквозная трассировка HTTP -> Kafka -> Flink (trace_id propagation)")
+    Container(loki, "Grafana Loki", "Log Aggregation", "Structured JSON logs Label-based indexing Correlation по trace_id")
+    Container(grafana, "Grafana", "Dashboards", "8 дашбордов: Event Platform Overview, Kafka Health, Consumer Groups, Saga Monitor, Flink Jobs, Booking Flow, Payment Flow, DLQ Dashboard")
+    Container(alertmanager, "Alertmanager", "Alert Routing", "P1 -> PagerDuty P2 -> Slack #alerts P3 -> Slack #warnings Grouping + Silencing")
+}
+
+System_Ext(pagerduty, "PagerDuty", "Incident Management On-call ротация")
+
+' ========== СВЯЗИ: OUTBOX -> CDC -> KAFKA ==========
+
+Rel(booking_service, outbox_booking, "Бизнес-операция + событие в одной TX")
+Rel(payments_service, outbox_payments, "Бизнес-операция + событие в одной TX")
+Rel(driver_service, outbox_driver, "Бизнес-операция + событие в одной TX")
+
+Rel(outbox_booking, debezium, "WAL (logical replication)")
+Rel(outbox_payments, debezium, "WAL (logical replication)")
+Rel(outbox_driver, debezium, "WAL (logical replication)")
+
+Rel(debezium, topic_booking, "Publish")
+Rel(debezium, topic_payment, "Publish")
+Rel(debezium, topic_driver_status, "Publish")
+
+' Direct produce (не через outbox - некритические/высокочастотные)
+Rel(driver_service, topic_driver_loc, "Direct produce (fire-and-forget, ~100K msg/s)", "OTLP traced")
+
+' Saga commands/replies
+Rel(booking_service, topic_saga_booking, "Saga commands", "Orchestrator")
+Rel(payments_service, topic_saga_payment, "Saga commands", "Orchestrator")
+Rel(fraud_service, topic_saga_booking, "Saga replies")
+Rel(fraud_service, topic_saga_payment, "Saga replies")
+Rel(pricing_service, topic_saga_booking, "Saga replies")
+Rel(driver_service, topic_saga_booking, "Saga replies")
+
+' Saga state
+Rel(booking_service, saga_db, "Saga state (saga_instances)")
+Rel(payments_service, saga_db, "Saga state")
+
+' Schema validation
+Rel(debezium, schema_registry, "Schema validation")
+Rel(driver_service, schema_registry, "Schema validation")
+
+' ========== СВЯЗИ: KAFKA -> FLINK ==========
+
+Rel(topic_driver_loc, flink_geo, "Subscribe")
+Rel(topic_driver_loc, flink_surge, "Subscribe")
+Rel(topic_driver_loc, flink_matching, "Subscribe")
+Rel(topic_booking, flink_surge, "Subscribe")
+Rel(topic_booking, flink_matching, "Subscribe")
+Rel(topic_booking, flink_fraud, "Subscribe")
+Rel(topic_booking, flink_analytics, "Subscribe")
+Rel(topic_geo, flink_surge, "Subscribe")
+Rel(topic_payment, flink_fraud, "Subscribe")
+Rel(topic_payment, flink_analytics, "Subscribe")
+Rel(topic_driver_status, flink_matching, "Subscribe")
+Rel(topic_demand, flink_matching, "Subscribe")
+Rel(topic_pricing, flink_analytics, "Subscribe")
+
+' ========== СВЯЗИ: FLINK -> OUTPUTS ==========
+
+Rel(flink_geo, elasticsearch, "Upsert driver location (batch 5s)")
+Rel(flink_geo, topic_geo, "GeozoneEntered/ Exited")
+Rel(flink_surge, redis_surge, "Update surge coefficient")
+Rel(flink_surge, topic_pricing, "SurgeUpdated")
+Rel(flink_matching, topic_driver_status, "DriverAssigned")
+Rel(flink_fraud, topic_fraud, "FraudDetected")
+Rel(flink_analytics, clickhouse, "Batch insert (every 10s)")
+
+' ========== СВЯЗИ: KAFKA -> SIMPLE CONSUMERS ==========
+
+Rel(topic_booking, notification_service, "Триггеры уведомлений")
+Rel(topic_payment, notification_service, "Триггеры уведомлений")
+Rel(topic_booking, analytics_service, "Бизнес-события")
+Rel(topic_payment, payments_service, "TripCompleted -> Payment Saga")
+
+' DLQ
+Rel(notification_service, topic_dlq, "Failed events (после 3 retry)")
+Rel(flink_fraud, topic_dlq, "Unprocessable events")
+
+' ========== СВЯЗИ: МОНИТОРИНГ ==========
+
+Rel(booking_service, otel_collector, "Metrics + Traces + Logs (OTel SDK)")
+Rel(driver_service, otel_collector, "Metrics + Traces + Logs")
+Rel(payments_service, otel_collector, "Metrics + Traces + Logs")
+Rel(pricing_service, otel_collector, "Metrics + Traces + Logs")
+Rel(notification_service, otel_collector, "Metrics + Traces + Logs")
+Rel(fraud_service, otel_collector, "Metrics + Traces + Logs")
+
+Rel(kafka_exporter, prometheus, "Kafka metrics: consumer lag, partition health")
+Rel(flink_metrics, prometheus, "Flink metrics: job status, throughput, latency")
+Rel(otel_collector, prometheus, "Service metrics: RED + saga + outbox + business")
+Rel(otel_collector, tempo, "Distributed traces: trace_id propagation through Kafka")
+Rel(otel_collector, loki, "Structured logs: JSON + trace_id correlation")
+
+Rel(prometheus, grafana, "PromQL queries (8 дашбордов)")
+Rel(tempo, grafana, "Trace visualization + exemplars")
+Rel(loki, grafana, "Log queries + trace_id correlation")
+Rel(prometheus, alertmanager, "Alert rules: ~50 правил (P1/P2/P3)")
+Rel(alertmanager, pagerduty, "P1 алерты: Kafka down, Flink failed, Saga failed")
+
+@enduml

@@ -1,0 +1,54 @@
+@startuml DLQ_Retry_Flow
+title Dead Letter Queue - Retry Flow
+
+participant "Producer" as producer
+queue "Основной топик (booking.trip.lifecycle.v1)" as main_topic
+participant "Consumer" as consumer
+queue "Retry Topic (internal)" as retry_topic
+queue "DLQ Topic (booking.trip.lifecycle.v1.dlq)" as dlq
+participant "Alertmanager -> PagerDuty/Slack" as alerting
+participant "On-call инженер" as oncall
+
+== Happy Path ==
+producer -> main_topic: Publish event
+main_topic -> consumer: Poll
+consumer -> consumer: Обработка OK
+consumer -> main_topic: ACK
+
+== Retry Flow ==
+producer -> main_topic: Publish event
+main_topic -> consumer: Poll
+consumer -> consumer: Ошибка обработки
+
+consumer -> retry_topic: Попытка 1 (delay: 1 сек)
+note right: Транзиентная ошибка (таймаут сети)
+retry_topic -> consumer: Retry
+consumer -> consumer: Ошибка
+
+consumer -> retry_topic: Попытка 2 (delay: 10 сек)
+note right: Кратковременная недоступность
+retry_topic -> consumer: Retry
+consumer -> consumer: Ошибка
+
+consumer -> retry_topic: Попытка 3 (delay: 60 сек)
+note right: Продолжительная недоступность
+retry_topic -> consumer: Retry
+consumer -> consumer: Ошибка
+
+== DLQ ==
+consumer -> dlq: Все 3 попытки исчерпаны -> отправка в DLQ
+note right of dlq
+  DLQ-событие содержит:
+  - original_event
+  - error (message + stack)
+  - retry_count: 3
+  - timestamps
+end note
+
+dlq -> alerting: dlq_messages_total > 0
+alerting -> oncall: Алерт (P1 для payment.*.dlq P3 для notification.*.dlq)
+
+oncall -> dlq: Анализ причины
+oncall -> main_topic: Ручной reprocess (после исправления)
+
+@enduml

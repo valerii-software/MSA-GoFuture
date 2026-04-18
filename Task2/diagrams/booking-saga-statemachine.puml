@@ -1,0 +1,39 @@
+@startuml Booking_Saga_StateMachine
+title Booking Saga - Машина состояний
+
+[*] --> CREATED : Пассажир создал заказ
+
+CREATED --> FRAUD_CHECK : CheckBookingFraudCmd
+
+FRAUD_CHECK --> CALCULATING_PRICE : FraudCheckPassed
+FRAUD_CHECK --> CANCELLED : FraudDetected [компенсация: CancelBookingCmd]
+
+CALCULATING_PRICE --> CALCULATING_ROUTE : PriceCalculated
+CALCULATING_PRICE --> CANCELLED : PriceError [компенсация: CancelBookingCmd]
+
+CALCULATING_ROUTE --> MATCHING_DRIVER : RouteCalculated
+CALCULATING_ROUTE --> CANCELLED : RouteError [компенсация: CancelBookingCmd]
+
+MATCHING_DRIVER --> CONFIRMED : DriverAssigned + NotifyPartiesCmd
+MATCHING_DRIVER --> MATCHING_DRIVER : DriverNotFound [retry до 3 раз с расширением радиуса]
+MATCHING_DRIVER --> CANCELLED : Все попытки исчерпаны [компенсация: CancelBookingCmd]
+MATCHING_DRIVER --> MATCHING_DRIVER : DriverCancelled [ReleaseDriverCmd + retry]
+
+CONFIRMED --> [*]
+
+CANCELLED --> [*]
+
+note right of CANCELLED
+  Причины отмены:
+  - CANCELLED_FRAUD
+  - CANCELLED_NO_DRIVER
+  - CANCELLED_TIMEOUT
+  - CANCELLED_BY_PASSENGER
+end note
+
+note right of MATCHING_DRIVER
+  Таймаут шага: 30 сек
+  Таймаут саги: 60 сек
+end note
+
+@enduml
