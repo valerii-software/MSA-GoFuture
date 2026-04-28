@@ -1,0 +1,224 @@
+@startuml C2_GoFuture_Global_Security
+!include https://raw.githubusercontent.com/plantuml-stdlib/C4-PlantUML/master/C4_Container.puml
+
+title GoFuture - C2: Целевая архитектура с глобальным развертыванием и защитой (элементы, выделенные красным - новые изменения Task 3)
+
+' ========== СТИЛИЗАЦИЯ НОВЫХ ЭЛЕМЕНТОВ (КРАСНЫЙ) ==========
+AddElementTag("new", $bgColor="#E74C3C", $fontColor="white", $borderColor="#C0392B", $legendText="НОВОЕ (Task 3)")
+AddRelTag("new", $lineColor="#E74C3C", $textColor="#E74C3C")
+
+' ========== ПОЛЬЗОВАТЕЛИ ==========
+Person(passenger, "Пассажир", "Заказывает поездки")
+Person(driver, "Водитель", "Принимает заказы и получает выплаты")
+Person(manager, "Корпоративный менеджер", "Управляет счетами")
+Person(accountant, "Бухгалтер", "Контролирует выплаты")
+Person(dev_engineer, "Разработчик", "Разрабатывает сервисы")
+Person(sre_engineer, "SRE инженер", "Мониторит систему")
+
+' ========== КЛИЕНТСКИЕ ПРИЛОЖЕНИЯ ==========
+System_Boundary(clients, "Клиентские приложения") {
+    Container(app_passenger, "Пассажирское приложение", "iOS/Android/Huawei", "Интерфейс для пассажиров. Client-side region affinity (кеш IP региона)")
+    Container(app_driver, "Водительское приложение", "iOS/Android/Huawei", "Интерфейс для водителей. Client-side region affinity")
+    Container(web_portal, "Корпоративный портал", "React/Vue.js", "Управление заказами и отчеты")
+    Container(admin_portal, "Админ-панель", "React", "Управление платформой")
+}
+
+' ========== НОВОЕ: SECURITY & EDGE LAYER (красный) ==========
+System_Boundary(security_edge, "Security & Edge Layer (Global)") {
+    Container(geodns, "GeoDNS / Global Load Balancer", "Cloudflare / AWS Global Accelerator", "Latency-based routing к ближайшему региону. Anycast IP. Health checks: 10s. TTL: 30s. Failover < 60s", $tags="new")
+    Container(ddos_protection, "DDoS Protection", "Cloudflare Shield", "L3/L4/L7 DDoS mitigation. Anycast сеть 310+ PoP. Rate limiting: 50K RPS. GeoIP filtering. Auto-scaling", $tags="new")
+    Container(waf, "WAF (Web Application Firewall)", "Cloudflare WAF / ModSecurity", "OWASP Top 10 rules. Bot Detection. Custom rules для fraud-паттернов. Managed rulesets (CRS)", $tags="new")
+}
+
+' ========== ИНФРАСТРУКТУРНЫЙ СЛОЙ ==========
+System_Boundary(infra_layer, "Инфраструктурный слой (per region)") {
+    Container(api_gateway, "API Gateway", "Kong / Envoy", "Маршрутизация, rate limiting, API versioning, canary routing, region-aware proxy")
+    Container(identity_service, "Identity Service", "OAuth 2.0 / JWT", "Аутентификация, авторизация, мультитенантность")
+    Container(vault, "Secret Manager", "HashiCorp Vault", "Управление секретами (DB credentials, API keys). Авторотация каждые 24ч. Per-region instance. K8s Vault Agent Injector", $tags="new")
+    Container(network_policy, "Network Policy Engine", "Calico / Cilium", "Zero-trust networking. Микросегментация: сервис -> сервис ACL. L3/L4 правила. Default deny all", $tags="new")
+}
+
+' ========== ДОМЕННЫЕ СЕРВИСЫ ==========
+System_Boundary(domain_services, "Доменные сервисы (per region)") {
+    Container(booking_service, "Booking Service", "Python / Go", "Управление жизненным циклом поездки")
+    Container(driver_service, "Driver Service", "Python / Go", "Профили, статусы, matching водителей")
+    Container(pricing_service, "Pricing Service", "Python / Go", "Динамическое ценообразование, surge pricing")
+    Container(payments_service, "Payments Service", "Python / Go", "Платежи, возвраты, выплаты водителям")
+    Container(notification_service, "Notification Service", "Python / Go", "Push, SMS, Email уведомления")
+    Container(geography_service, "Geography Service", "Python / Go", "Геокодирование, маршруты, ETA, геопоиск водителей")
+    Container(analytics_service, "Analytics Service", "Python / Spark / Flink", "Аналитика, ML-прогнозы, BI-отчеты")
+    Container(fraud_service, "Fraud Service", "Python / Go", "Обнаружение мошенничества, ML-модели, risk scoring")
+}
+
+' ========== БАЗЫ ДАННЫХ (Database per Service, per Region) ==========
+System_Boundary(databases, "Базы данных (Database per Service, per Region)") {
+    ContainerDb(db_booking, "Booking DB", "PostgreSQL", "bookings, trip_statuses, trip_history")
+    ContainerDb(db_driver, "Driver DB", "PostgreSQL", "drivers, profiles, ratings, documents")
+    ContainerDb(db_pricing, "Pricing DB", "PostgreSQL", "pricing_rules, tariffs, surge_zones")
+    ContainerDb(db_payments, "Payments DB", "PostgreSQL (PCI DSS)", "payments, transactions, payouts, balances")
+    ContainerDb(db_notification, "Notification DB", "PostgreSQL", "templates, device_tokens, preferences")
+    ContainerDb(db_geography, "Geography DB", "PostgreSQL (PostGIS)", "geo_zones, geo_regions")
+    ContainerDb(db_fraud, "Fraud DB", "PostgreSQL", "fraud_rules, scores, blacklists")
+    ContainerDb(db_identity, "Identity DB", "PostgreSQL", "users, roles, permissions, tenants")
+}
+
+' ========== КЕШИРОВАНИЕ И ПОИСК ==========
+System_Boundary(cache_search, "Кеширование и поиск (per region)") {
+    ContainerDb(redis_pricing, "Pricing Cache", "Redis", "Кеш ценовых правил")
+    ContainerDb(redis_geo, "Geo Cache", "Redis", "Кеш геоданных и позиций водителей")
+    ContainerDb(elasticsearch, "Driver Locations", "Elasticsearch", "Геоиндекс позиций водителей")
+}
+
+' ========== СОБЫТИЙНАЯ ШИНА ==========
+System_Boundary(event_infra, "Событийная инфраструктура (per region)") {
+    ContainerQueue(kafka, "Event Bus", "Apache Kafka", "Доменные события между сервисами")
+    Container(schema_registry, "Schema Registry", "Confluent / Apicurio", "Версионирование схем событий (Avro/Protobuf)")
+    ContainerQueue(kafka_mirror, "MirrorMaker 2", "Kafka Connect", "Репликация аналитических событий в FRA (анонимизированных)", $tags="new")
+}
+
+' ========== МОНИТОРИНГ И OBSERVABILITY ==========
+System_Boundary(observability, "Observability (per region + global)") {
+    Container(prometheus, "Prometheus", "Monitoring", "Сбор метрик")
+    Container(grafana, "Grafana", "Dashboard", "Визуализация метрик")
+    Container(tempo, "Tempo / Jaeger", "Distributed Tracing", "Трассировка запросов")
+    Container(loki, "Loki", "Log Aggregation", "Централизованные логи")
+    Container(alertmanager, "Alertmanager", "Alert System", "Алертинг")
+    Container(siem, "SIEM", "Elastic SIEM / Wazuh", "Корреляция security-событий. Обнаружение аномалий. WAF logs + Network Policy denies + failed auth. Incident response", $tags="new")
+}
+
+' ========== CI/CD ==========
+System_Boundary(cicd, "CI/CD") {
+    Container(cicd_server, "CI/CD Pipeline", "GitLab CI / GitHub Actions", "Сборка, тесты, деплой каждого сервиса отдельно")
+    Container(k8s, "Kubernetes", "Container Orchestration", "Оркестрация, автоскейлинг, Service Mesh (Istio), Pod anti-affinity по AZ")
+    Container(registry, "Container Registry", "Docker Registry", "Хранение образов сервисов")
+}
+
+' ========== АНАЛИТИКА ==========
+System_Boundary(analytics_infra, "Аналитическая инфраструктура (FRA - Global)") {
+    ContainerDb(clickhouse, "Analytics DB", "ClickHouse", "Аналитические данные всех регионов (анонимизированные)")
+    Container(datalens, "DataLens", "BI Tool", "Бизнес-отчеты")
+}
+
+' ========== ВНЕШНИЕ СИСТЕМЫ ==========
+System_Ext(yandex_pay, "Яндекс Пэй", "Платежный шлюз")
+System_Ext(yandex_maps, "Яндекс Карты", "Картографический сервис")
+System_Ext(fcm, "FCM", "Push-сервис Google")
+System_Ext(apns, "APNs", "Push-сервис Apple")
+System_Ext(huawei_push, "Huawei Push Kit", "Push-сервис Huawei")
+System_Ext(bank_api, "API Банка", "Банковские выплаты")
+
+' ===================== СВЯЗИ =====================
+
+' --- Пользователи -> Клиенты ---
+Rel(passenger, app_passenger, "Использует")
+Rel(driver, app_driver, "Использует")
+Rel(manager, web_portal, "Использует")
+Rel(accountant, admin_portal, "Использует")
+Rel(dev_engineer, cicd_server, "Запускает пайплайны")
+Rel(sre_engineer, grafana, "Мониторит систему")
+
+' --- НОВОЕ: Клиенты -> GeoDNS -> DDoS -> WAF -> API Gateway ---
+Rel(app_passenger, geodns, "HTTPS", $tags="new")
+Rel(app_driver, geodns, "HTTPS", $tags="new")
+Rel(web_portal, geodns, "HTTPS", $tags="new")
+Rel(admin_portal, geodns, "HTTPS", $tags="new")
+
+Rel(geodns, ddos_protection, "Anycast routing к ближайшему региону", $tags="new")
+Rel(ddos_protection, waf, "Clean L3/L4 traffic", $tags="new")
+Rel(waf, api_gateway, "Clean L7 traffic (OWASP filtered)", $tags="new")
+
+' --- API Gateway -> Identity + Сервисы ---
+Rel(api_gateway, identity_service, "Валидация JWT")
+Rel(api_gateway, booking_service, "REST/gRPC")
+Rel(api_gateway, driver_service, "REST/gRPC")
+Rel(api_gateway, pricing_service, "REST/gRPC")
+Rel(api_gateway, payments_service, "REST/gRPC")
+Rel(api_gateway, notification_service, "REST/gRPC")
+Rel(api_gateway, geography_service, "REST/gRPC")
+Rel(api_gateway, analytics_service, "REST/gRPC")
+
+' --- НОВОЕ: Network Policy (межсервисный firewall) ---
+Rel(network_policy, booking_service, "mTLS + ACL rules", $tags="new")
+Rel(network_policy, payments_service, "mTLS + ACL rules", $tags="new")
+
+' --- НОВОЕ: Vault -> сервисы ---
+Rel(vault, payments_service, "DB credentials, API keys (auto-rotation)", $tags="new")
+Rel(vault, identity_service, "JWT signing keys, DB credentials", $tags="new")
+
+' --- Синхронные вызовы между сервисами (критический путь) ---
+Rel(booking_service, pricing_service, "Расчет цены", "gRPC")
+Rel(booking_service, geography_service, "Маршрут и ETA", "gRPC")
+Rel(booking_service, driver_service, "Назначение водителя", "gRPC")
+Rel(booking_service, fraud_service, "Проверка заказа", "gRPC")
+Rel(payments_service, fraud_service, "Проверка транзакции", "gRPC")
+Rel(driver_service, geography_service, "Позиции водителей", "gRPC")
+Rel(pricing_service, geography_service, "Расстояние/время", "gRPC")
+
+' --- Сервисы -> свои БД ---
+Rel(booking_service, db_booking, "SQL", "ORM")
+Rel(driver_service, db_driver, "SQL", "ORM")
+Rel(pricing_service, db_pricing, "SQL", "ORM")
+Rel(payments_service, db_payments, "SQL", "ORM")
+Rel(notification_service, db_notification, "SQL", "ORM")
+Rel(geography_service, db_geography, "SQL", "ORM")
+Rel(fraud_service, db_fraud, "SQL", "ORM")
+Rel(identity_service, db_identity, "SQL", "ORM")
+
+' --- Кеширование и поиск ---
+Rel(pricing_service, redis_pricing, "Кеш тарифов")
+Rel(geography_service, redis_geo, "Кеш геоданных")
+Rel(geography_service, elasticsearch, "Геопоиск водителей")
+
+' --- Событийная шина (Kafka) ---
+Rel(booking_service, kafka, "BookingCreated, TripCompleted...", "Publish")
+Rel(driver_service, kafka, "DriverAssigned, LocationUpdated...", "Publish")
+Rel(pricing_service, kafka, "PriceCalculated, SurgeUpdated...", "Publish")
+Rel(payments_service, kafka, "PaymentCompleted, PayoutCompleted...", "Publish")
+
+Rel(kafka, notification_service, "Триггеры уведомлений", "Subscribe")
+Rel(kafka, analytics_service, "Все бизнес-события", "Subscribe")
+Rel(kafka, payments_service, "TripCompleted -> платеж", "Subscribe")
+Rel(kafka, fraud_service, "События для ML-модели", "Subscribe")
+Rel(kafka, pricing_service, "События для surge-модели", "Subscribe")
+
+Rel(kafka, schema_registry, "Валидация схем")
+
+' --- НОВОЕ: MirrorMaker -> глобальный Kafka ---
+Rel(kafka, kafka_mirror, "Аналитические события", $tags="new")
+
+' --- Внешние интеграции ---
+Rel(payments_service, yandex_pay, "Процессинг платежей", "REST API")
+Rel(payments_service, bank_api, "Банковские выплаты", "REST API")
+Rel(geography_service, yandex_maps, "Геоданные и маршруты", "REST API")
+Rel(notification_service, fcm, "Push Android", "REST API")
+Rel(notification_service, apns, "Push iOS", "REST API")
+Rel(notification_service, huawei_push, "Push Huawei", "REST API")
+
+' --- Observability ---
+Rel(k8s, prometheus, "Метрики сервисов", "Prometheus scrape")
+Rel(prometheus, grafana, "Данные для дашбордов", "PromQL")
+Rel(prometheus, alertmanager, "Алерты", "Alert Rules")
+Rel(k8s, loki, "Логи контейнеров", "Structured JSON")
+Rel(k8s, tempo, "Трейсы (OpenTelemetry)", "OTLP")
+Rel(tempo, grafana, "Визуализация трейсов")
+Rel(loki, grafana, "Визуализация логов")
+
+' --- НОВОЕ: Security events -> SIEM ---
+Rel(waf, siem, "WAF events: blocked requests, bot detections", $tags="new")
+Rel(network_policy, siem, "Network Policy: denied connections, anomaly traffic", $tags="new")
+Rel(identity_service, siem, "Auth events: failed logins, suspicious patterns", $tags="new")
+Rel(siem, alertmanager, "Security алерты -> PagerDuty", $tags="new")
+
+' --- CI/CD ---
+Rel(cicd_server, registry, "Push образов")
+Rel(cicd_server, k8s, "Deploy сервисов", "kubectl/Helm")
+
+' --- Аналитика ---
+Rel(analytics_service, clickhouse, "Запись аналитики", "Kafka Engine / ETL")
+Rel(clickhouse, datalens, "BI-отчеты", "SQL")
+Rel(datalens, manager, "Бизнес-отчеты")
+Rel(datalens, accountant, "Финансовые отчеты")
+
+SHOW_LEGEND()
+
+@enduml

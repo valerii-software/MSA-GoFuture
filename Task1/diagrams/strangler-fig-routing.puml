@@ -1,0 +1,60 @@
+@startuml Strangler_Fig_Routing
+!include https://raw.githubusercontent.com/plantuml-stdlib/C4-PlantUML/master/C4_Container.puml
+
+title GoFuture - Механизмы обратной совместимости (Strangler Fig)
+
+Person(client, "Клиентское приложение", "iOS / Android / Web")
+
+System_Boundary(platform, "GoFuture Platform") {
+
+    Container(api_gw, "API Gateway", "Kong / Envoy", "Маршрутизация + Canary routing + API Versioning (v1/v2) + Rate Limiting")
+
+    Container(feature_flags, "Feature Flags", "Unleash / LaunchDarkly", "Управление rollout: use_geography_service: 100% use_pricing_service: 25%")
+
+    System_Boundary(new_services, "Новые микросервисы") {
+        Container(new_service, "Новый сервис (например Geography)", "Python/Go", "Собственная БД Новый API")
+        ContainerDb(new_db, "Новая БД", "PostgreSQL", "Source of truth после cutover")
+    }
+
+    System_Boundary(monolith_boundary, "Монолит (Strangler Fig)") {
+        Container(monolith, "GoFuture Monolith", "Django", "Оставшиеся компоненты + ACL-адаптеры")
+        Container(acl, "Anti-Corruption Layer", "Python adapter", "Преобразование форматов: старый <-> новый API")
+        ContainerDb(mono_db, "Монолитная БД", "PostgreSQL RDS", "Materialized views для обратной совместимости")
+    }
+
+    System_Boundary(sync_layer, "Синхронизация данных") {
+        Container(debezium, "Debezium CDC", "Kafka Connect", "WAL -> Kafka -> Materialized View")
+        ContainerQueue(kafka, "Kafka", "Event Bus", "CDC-события + Доменные события")
+    }
+
+    Container(pact_broker, "Pact Broker", "Contract Testing", "Consumer-driven contracts")
+    Container(schema_reg, "Schema Registry", "Confluent", "Версионирование схем событий (Avro)")
+}
+
+' --- Маршрутизация ---
+Rel(client, api_gw, "HTTPS (единый URL)")
+Rel(api_gw, feature_flags, "Проверка флага")
+Rel(api_gw, new_service, "/api/v1/geography/* (после canary rollout)")
+Rel(api_gw, monolith, "/api/v1/* (остальное) + fallback при ошибках")
+
+' --- ACL ---
+Rel(monolith, acl, "Внутренний вызов")
+Rel(acl, new_service, "HTTP/gRPC (новый формат)")
+
+' --- БД ---
+Rel(new_service, new_db, "SQL (ORM)")
+Rel(monolith, mono_db, "SQL (ORM)")
+
+' --- CDC синхронизация ---
+Rel(new_db, debezium, "WAL (logical replication)")
+Rel(debezium, kafka, "CDC-события")
+Rel(kafka, mono_db, "Consumer -> Materialized View")
+
+' --- Contract testing ---
+Rel(monolith, pact_broker, "Consumer contracts")
+Rel(new_service, pact_broker, "Provider verification")
+
+' --- Schema Registry ---
+Rel(kafka, schema_reg, "Валидация Avro-схем")
+
+@enduml

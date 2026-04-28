@@ -1,0 +1,62 @@
+@startuml Observability_Architecture
+!include https://raw.githubusercontent.com/plantuml-stdlib/C4-PlantUML/master/C4_Container.puml
+
+title GoFuture - Архитектура сбора телеметрии (Observability)
+
+' === ИСТОЧНИКИ ТЕЛЕМЕТРИИ ===
+System_Boundary(sources, "Источники телеметрии") {
+    Container(services, "Доменные сервисы (Booking, Driver, Pricing, Payments, Notification, Geography, Fraud, Analytics)", "Python/Go + OTel SDK", "Метрики (RED) + Трейсы (spans) + Structured logs (JSON)")
+    Container(kafka_brokers, "Kafka Brokers", "Kafka", "Broker metrics, partition health")
+    Container(flink_jobs, "Flink Jobs", "Flink", "Job status, throughput, checkpoint, backpressure")
+    Container(saga_orch, "Saga Orchestrators", "Booking + Payments", "saga_active, completed, failed, duration, step_duration")
+}
+
+' === СБОР ===
+System_Boundary(collection, "Сбор телеметрии") {
+    Container(otel_collector, "OpenTelemetry Collector", "OTel Collector (DaemonSet)", "Прием: OTLP Экспорт: Prometheus, Tempo, Loki")
+    Container(kafka_exporter, "Kafka Exporter", "Prometheus Exporter", "Consumer lag, partition metrics, broker health")
+    Container(flink_reporter, "Flink Metrics Reporter", "Prometheus Reporter", "Built-in Flink Prometheus integration")
+}
+
+' === ХРАНЕНИЕ ===
+System_Boundary(storage, "Хранение и обработка") {
+    Container(prometheus, "Prometheus", "TSDB", "Метрики (15s scrape) Retention: 30 дней ~60 правил алертинга")
+    Container(tempo, "Grafana Tempo", "Trace storage (S3)", "Distributed traces trace_id propagation через Kafka headers")
+    Container(loki, "Grafana Loki", "Log aggregation", "Structured JSON logs label-based indexing trace_id correlation")
+}
+
+' === ВИЗУАЛИЗАЦИЯ ===
+System_Boundary(visualization, "Визуализация и алертинг") {
+    Container(grafana, "Grafana", "Dashboards", "8 дашбордов: • Event Platform Overview • Kafka Cluster Health • Consumer Groups • Saga Monitor • Flink Jobs • Booking Flow • Payment Flow • DLQ Dashboard")
+    Container(alertmanager, "Alertmanager", "Alert routing", "Группировка Silencing Маршрутизация по severity")
+}
+
+' === ВНЕШНИЕ ===
+System_Ext(pagerduty, "PagerDuty", "P1 -> On-call Incident management")
+System_Ext(slack, "Slack", "P2 -> #alerts P3 -> #warnings")
+
+Person(sre, "SRE инженер", "Мониторит систему")
+
+' === СВЯЗИ ===
+Rel(services, otel_collector, "OTLP (metrics + traces + logs)")
+Rel(kafka_brokers, kafka_exporter, "JMX metrics")
+Rel(flink_jobs, flink_reporter, "Flink metrics API")
+Rel(saga_orch, otel_collector, "OTLP (saga metrics)")
+
+Rel(otel_collector, prometheus, "Remote write (metrics)")
+Rel(otel_collector, tempo, "OTLP (traces)")
+Rel(otel_collector, loki, "OTLP (logs)")
+Rel(kafka_exporter, prometheus, "Scrape")
+Rel(flink_reporter, prometheus, "Scrape")
+
+Rel(prometheus, grafana, "PromQL")
+Rel(tempo, grafana, "Trace queries + Exemplars")
+Rel(loki, grafana, "LogQL + trace_id link")
+Rel(prometheus, alertmanager, "Alert rules")
+
+Rel(alertmanager, pagerduty, "P1 алерты")
+Rel(alertmanager, slack, "P2, P3 алерты")
+
+Rel(sre, grafana, "Дашборды и исследование инцидентов")
+
+@enduml

@@ -1,0 +1,148 @@
+@startuml C2_Multitenant_IAM_GoFuture
+!include https://raw.githubusercontent.com/plantuml-stdlib/C4-PlantUML/master/C4_Container.puml
+
+title GoFuture - C2: Мультитенантная платформа с IAM, изоляцией данных и мониторингом
+
+AddElementTag("iam", $bgColor="#E74C3C", $fontColor="white", $legendText="IAM (Identity & Access Management)")
+AddElementTag("tenant", $bgColor="#8E44AD", $fontColor="white", $legendText="Tenant Management")
+AddElementTag("monitoring", $bgColor="#27AE60", $fontColor="white", $legendText="Tenant Monitoring")
+AddElementTag("isolation", $bgColor="#2E86C1", $fontColor="white", $legendText="Data Isolation")
+AddElementTag("existing", $bgColor="#1A5276", $fontColor="white", $legendText="Existing Services")
+
+AddRelTag("auth", $lineColor="#E74C3C", $textColor="#E74C3C")
+AddRelTag("tenant_flow", $lineColor="#8E44AD", $textColor="#8E44AD")
+AddRelTag("monitor", $lineColor="#27AE60", $lineStyle=DottedLine(), $textColor="#27AE60")
+AddRelTag("data", $lineColor="#2C3E50", $textColor="#2C3E50")
+
+' ========== ACTORS ==========
+Person(partner_admin, "Администратор партнера", "Управляет тенантом: пользователи, настройки, брендинг, тарифы")
+Person(partner_user, "Сотрудник партнера", "Работает с заказами, отчетами через SSO")
+Person(passenger, "Пассажир", "Заказывает поездки через приложение партнера")
+Person(platform_admin, "GoFuture Platform Admin", "Управляет тенантами, мониторит платформу")
+
+System_Ext(partner_idp, "Корпоративный IdP партнера", "Azure AD / Okta / Google Workspace (SAML 2.0 / OIDC)")
+
+' ========== PARTNER PORTAL ==========
+System_Boundary(portal, "Partner Portal (Self-Service)") {
+    Container(partner_portal, "Partner Portal", "React", "Dashboard, Branding, Pricing, Users, API, Finance, Support, Compliance", $tags="tenant")
+    Container(admin_portal, "Platform Admin Portal", "React", "Управление всеми тенантами, onboarding status, billing", $tags="tenant")
+}
+
+' ========== IAM LAYER ==========
+System_Boundary(iam_layer, "IAM Layer (Identity & Access Management)") {
+    Container(keycloak, "Keycloak (Identity Provider)", "Keycloak HA", "Realm per tenant. User management. JWT token issuance. SSO Federation (SAML 2.0 / OIDC). Role mapping", $tags="iam")
+    Container(opa, "Policy Engine", "Open Policy Agent", "RBAC + ABAC policies. Tenant-aware rules. Per-endpoint permissions. Declarative (Rego). Sidecar: < 2ms latency", $tags="iam")
+    Container(api_gateway, "API Gateway", "Kong / Envoy", "JWT validation. Tenant context extraction. Per-tenant rate limiting. Route to services. OPA policy check", $tags="iam")
+}
+
+' ========== TENANT MANAGEMENT ==========
+System_Boundary(tenant_mgmt, "Tenant Management") {
+    Container(provisioning_svc, "Tenant Provisioning Service", "Go / Python", "Automated onboarding pipeline (Saga). Create: DB schema/RLS, Keycloak realm, configs, monitoring, sandbox. < 10 min end-to-end", $tags="tenant")
+    Container(tenant_config, "Tenant Configuration Service", "Go / Python", "Tenant settings: tier, pricing plan, branding, SLA, feature flags, rate limits. Cached in Redis", $tags="tenant")
+    ContainerDb(tenant_registry, "Tenant Registry", "PostgreSQL", "tenants, tenant_configs, tenant_tiers, onboarding_status, lifecycle_state", $tags="tenant")
+}
+
+' ========== DOMAIN SERVICES (tenant-aware) ==========
+System_Boundary(domain_services, "Доменные сервисы (tenant-aware)") {
+    Container(booking_service, "Booking Service", "Python / Go", "Tenant context от API Gateway. Все запросы фильтруются по tenant_id", $tags="existing")
+    Container(driver_service, "Driver Service", "Python / Go", "Driver pool per tenant. Matching в рамках тенанта", $tags="existing")
+    Container(pricing_service, "Pricing Service", "Python / Go", "Тарифы per tenant. Custom pricing rules. Surge per tenant zone", $tags="existing")
+    Container(payments_service, "Payments Service", "Python / Go", "Отдельный биллинг per tenant. Payout настройки партнера", $tags="existing")
+    Container(notification_svc, "Notification Service", "Python / Go", "Шаблоны с брендингом партнера", $tags="existing")
+}
+
+' ========== DATA ISOLATION LAYER ==========
+System_Boundary(data_isolation, "Data Isolation Layer") {
+    ContainerDb(db_enterprise, "Enterprise DB (schema-per-tenant)", "PostgreSQL", "Dedicated schema для Enterprise-тенантов. CREATE SCHEMA tenant_{name}. Полная физическая изоляция таблиц", $tags="isolation")
+    ContainerDb(db_shared, "Shared DB (Row-Level Security)", "PostgreSQL + RLS", "Standard/Business: Shared tables + RLS policy. tenant_id = current_setting ('app.current_tenant_id'). PgBouncer: per-tenant connection pool", $tags="isolation")
+    ContainerDb(redis_tenant, "Redis (tenant namespaces)", "Redis Cluster", "Key prefix: {tenant_id}:cache:* {tenant_id}:session:* {tenant_id}:feature:* TTL per tenant config", $tags="isolation")
+    ContainerQueue(kafka_shared, "Kafka (shared topics)", "Apache Kafka", "tenant_id в header + payload. Enterprise: dedicated consumer group. Quota per tenant", $tags="isolation")
+    ContainerDb(s3_tenant, "S3 Data Lake (partitioned)", "S3 + Iceberg", "Partition: tenant_id=xxx/ IAM policy per prefix. Physical file isolation", $tags="isolation")
+}
+
+' ========== TENANT MONITORING ==========
+System_Boundary(tenant_monitoring, "Мониторинг мультитенантного окружения") {
+    Container(tenant_metrics, "Tenant Metrics Collector", "Prometheus + OTel SDK", "Per-tenant labels: requests, latency, errors, bookings, payments. Noisy neighbor detection", $tags="monitoring")
+    Container(tenant_dashboards, "Tenant Dashboards", "Grafana", "Per-tenant dashboard (auto-provisioned). All Tenants Overview. Noisy Neighbor board. Onboarding Status", $tags="monitoring")
+    Container(tenant_alerts, "Tenant Alerting", "Alertmanager", "Per-tenant алерты: SLA breach -> partner. Quota > 80% -> partner. Noisy neighbor -> SRE. Security anomaly -> sec", $tags="monitoring")
+    Container(billing_meter, "Usage Metering & Billing", "Custom Service", "Track per-tenant usage: API calls, bookings, storage, events. Generate invoices. Overage alerts", $tags="monitoring")
+}
+
+' ========== AUDIT ==========
+ContainerDb(audit_log, "Audit Log", "PostgreSQL (append-only)", "Все auth-события. Изменения ролей. Доступ к PII. Retention: 5 лет. Compliance: GDPR, LGPD, PDPA", $tags="iam")
+
+' ========== CONNECTIONS: AUTH FLOW ==========
+
+Rel(partner_admin, partner_portal, "Управляет тенантом")
+Rel(partner_user, partner_portal, "Работает с заказами")
+Rel(platform_admin, admin_portal, "Управляет платформой")
+Rel(passenger, api_gateway, "REST API (HTTPS) с tenant context")
+
+' SSO flow
+Rel(partner_user, keycloak, "1. Login request", $tags="auth")
+Rel(keycloak, partner_idp, "2. SAML/OIDC redirect", $tags="auth")
+Rel(partner_idp, keycloak, "3. SAML Assertion / OIDC Token", $tags="auth")
+Rel(keycloak, partner_user, "4. JWT (tenant_id + roles)", $tags="auth")
+
+' Portal -> API Gateway
+Rel(partner_portal, api_gateway, "REST API + JWT", $tags="auth")
+Rel(admin_portal, api_gateway, "REST API + JWT", $tags="auth")
+
+' API Gateway auth chain
+Rel(api_gateway, keycloak, "JWT validation (public key)", $tags="auth")
+Rel(api_gateway, opa, "Policy check: role + tenant + resource + action", $tags="auth")
+Rel(api_gateway, tenant_config, "Tenant config: rate limits, tier, feature flags", $tags="tenant_flow")
+
+' API Gateway -> Domain Services
+Rel(api_gateway, booking_service, "REST/gRPC + tenant context (header)")
+Rel(api_gateway, driver_service, "REST/gRPC")
+Rel(api_gateway, pricing_service, "REST/gRPC")
+Rel(api_gateway, payments_service, "REST/gRPC")
+Rel(api_gateway, notification_svc, "REST/gRPC")
+
+' ========== CONNECTIONS: TENANT MANAGEMENT ==========
+
+Rel(admin_portal, provisioning_svc, "Create/manage tenant", $tags="tenant_flow")
+Rel(partner_portal, tenant_config, "Update branding, pricing, settings", $tags="tenant_flow")
+Rel(provisioning_svc, keycloak, "Create realm, roles, users", $tags="tenant_flow")
+Rel(provisioning_svc, db_enterprise, "Create schema (Enterprise)", $tags="tenant_flow")
+Rel(provisioning_svc, db_shared, "Create RLS policy (Standard/Business)", $tags="tenant_flow")
+Rel(provisioning_svc, tenant_dashboards, "Create Grafana dashboard", $tags="tenant_flow")
+Rel(provisioning_svc, tenant_registry, "Store tenant metadata")
+Rel(tenant_config, tenant_registry, "Read config")
+
+' ========== CONNECTIONS: DATA ISOLATION ==========
+
+Rel(booking_service, db_enterprise, "Enterprise tenants (schema-per-tenant)")
+Rel(booking_service, db_shared, "Standard/Business (RLS filtered)")
+Rel(booking_service, kafka_shared, "Events + tenant_id header")
+Rel(booking_service, redis_tenant, "{tenant_id}:* namespace")
+
+Rel(payments_service, db_enterprise, "Enterprise")
+Rel(payments_service, db_shared, "Standard/Business")
+Rel(pricing_service, redis_tenant, "Tenant pricing cache")
+Rel(notification_svc, redis_tenant, "Tenant templates")
+
+' ========== CONNECTIONS: MONITORING ==========
+
+Rel(booking_service, tenant_metrics, "Metrics + tenant_id label", $tags="monitor")
+Rel(payments_service, tenant_metrics, "Metrics", $tags="monitor")
+Rel(api_gateway, tenant_metrics, "Request metrics per tenant", $tags="monitor")
+
+Rel(tenant_metrics, tenant_dashboards, "PromQL queries", $tags="monitor")
+Rel(tenant_metrics, tenant_alerts, "Alert rules per tenant", $tags="monitor")
+Rel(tenant_metrics, billing_meter, "Usage data for billing", $tags="monitor")
+
+Rel(tenant_dashboards, partner_admin, "Tenant dashboard (filtered)")
+Rel(tenant_dashboards, platform_admin, "All tenants overview")
+Rel(tenant_alerts, partner_admin, "SLA/quota alerts")
+
+' ========== CONNECTIONS: AUDIT ==========
+
+Rel(keycloak, audit_log, "Auth events: login, logout, failed attempts", $tags="auth")
+Rel(opa, audit_log, "Access decisions: allow/deny + resource + tenant", $tags="auth")
+Rel(provisioning_svc, audit_log, "Onboarding events: create, modify, delete tenant", $tags="auth")
+
+SHOW_LEGEND()
+
+@enduml

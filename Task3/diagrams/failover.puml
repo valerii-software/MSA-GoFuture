@@ -1,0 +1,125 @@
+@startuml failover_architecture
+!include https://raw.githubusercontent.com/plantuml-stdlib/C4-PlantUML/master/C4_Container.puml
+
+title GoFuture - Аварийное переключение (Failover): точки отказа и механизмы переключения
+
+AddElementTag("healthy", $bgColor="#27AE60", $fontColor="white")
+AddElementTag("ha_component", $bgColor="#2E86C1", $fontColor="white")
+AddElementTag("monitor", $bgColor="#8E44AD", $fontColor="white")
+AddElementTag("failover_target", $bgColor="#F39C12", $fontColor="white")
+AddElementTag("failure_point", $bgColor="#E74C3C", $fontColor="white")
+
+AddRelTag("normal", $lineColor="#27AE60", $textColor="#27AE60")
+AddRelTag("failover_path", $lineColor="#E74C3C", $lineStyle=DashedLine(), $textColor="#E74C3C")
+AddRelTag("health_check", $lineColor="#8E44AD", $lineStyle=DottedLine(), $textColor="#8E44AD")
+AddRelTag("replication", $lineColor="#E67E22", $lineStyle=DashedLine(), $textColor="#E67E22")
+
+Person(user, "Пользователь", "Пассажир / Водитель")
+
+' ========== GLOBAL MONITORING ==========
+System_Boundary(global_monitoring, "Глобальный мониторинг") {
+    Container(geodns, "GeoDNS + Health Checks", "Cloudflare", "Latency-based routing. HTTP health checks каждые 10 сек. Unhealthy: 3 fails (30s). Healthy: 2 passes (20s). TTL: 30s", $tags="monitor")
+    Container(global_grafana, "Global Grafana", "Grafana", "Глобальный дашборд: регионы, метрики, алерты всех регионов", $tags="monitor")
+}
+
+' ========== SINGAPORE REGION ==========
+System_Boundary(sgp, "Singapore (SGP) - Primary SEA") {
+    Container(sgp_gw, "API Gateway (SGP)", "Kong / Envoy", "Health: /health Circuit breaker Rate limiting", $tags="healthy")
+
+    System_Boundary(sgp_k8s, "Kubernetes Cluster (3 AZ)") {
+        Container(sgp_pods, "Domain Services", "Pods (HPA)", "Точка отказа #1: Отказ pod -> K8s restart (RTO < 15s)  Точка отказа #2: Отказ AZ -> reschedule (RTO < 30s)", $tags="ha_component")
+    }
+
+    System_Boundary(sgp_data, "Data Layer (SGP)") {
+        ContainerDb(sgp_pg, "PostgreSQL", "Patroni HA", "Primary + 2 Replica. Точка отказа #5: Отказ primary -> auto-promote replica (Patroni, RTO < 30s)", $tags="ha_component")
+        ContainerQueue(sgp_kafka, "Kafka", "3 brokers, ISR=2", "Точка отказа #6: Отказ broker -> auto leader election (RTO < 10s)", $tags="ha_component")
+        ContainerDb(sgp_redis, "Redis", "Sentinel HA", "3 nodes + Sentinel. Auto-failover (RTO < 15s)", $tags="ha_component")
+    }
+}
+
+' ========== JAKARTA REGION (Failover for SGP) ==========
+System_Boundary(jkt, "Jakarta (JKT) - Failover for SGP") {
+    Container(jkt_gw, "API Gateway (JKT)", "Kong / Envoy", "Primary для IDN. Failover для SGP. HPA buffer: +50% capacity on failover", $tags="failover_target")
+
+    System_Boundary(jkt_k8s, "Kubernetes Cluster (3 AZ)") {
+        Container(jkt_pods, "Domain Services", "Pods (HPA)", "Auto-scale при failover SGP: min -> max за 60s", $tags="ha_component")
+    }
+
+    System_Boundary(jkt_data, "Data Layer (JKT)") {
+        ContainerDb(jkt_pg, "PostgreSQL", "Patroni HA", "Primary + 2 Replica (JKT-пользователи)", $tags="ha_component")
+        ContainerQueue(jkt_kafka, "Kafka", "3 brokers", "Regional events + SGP overflow", $tags="ha_component")
+    }
+}
+
+' ========== SAO PAULO REGION ==========
+System_Boundary(gru, "Sao Paulo (GRU) - Primary SA") {
+    Container(gru_gw, "API Gateway (GRU)", "Kong / Envoy", "Health: /health Circuit breaker", $tags="healthy")
+
+    System_Boundary(gru_data, "Data + Compute (GRU)") {
+        Container(gru_pods, "Domain Services", "Pods (HPA)", "K8s (3 AZ) Anti-affinity", $tags="ha_component")
+        ContainerDb(gru_pg, "PostgreSQL", "Patroni HA", "Primary + 2 Replica", $tags="ha_component")
+        ContainerQueue(gru_kafka, "Kafka", "3 brokers", "Regional events", $tags="ha_component")
+    }
+}
+
+' ========== FRANKFURT REGION (DR Hub) ==========
+System_Boundary(fra, "Frankfurt (FRA) - DR Hub / Failover for GRU") {
+    Container(fra_gw, "API Gateway (FRA)", "Kong / Envoy", "Control Plane. Failover для GRU. Standby domain services", $tags="failover_target")
+
+    System_Boundary(fra_data, "Data + Compute (FRA)") {
+        Container(fra_pods, "Domain Services (standby)", "Pods (HPA)", "Warm standby: min replicas. Scale-up при GRU failover", $tags="ha_component")
+        ContainerDb(fra_pg, "PostgreSQL", "Patroni HA", "Identity Primary + Reference Primary + GRU failover replica", $tags="ha_component")
+    }
+}
+
+' ========== EXTERNAL SYSTEMS ==========
+System_Ext(ext_payment, "Яндекс Пэй / Alternative PSP", "Точка отказа #7: Отказ -> Circuit Breaker -> fallback PSP (RTO < 5s)")
+
+' ========== NORMAL TRAFFIC FLOW ==========
+Rel(user, geodns, "api.gofuture.com")
+Rel(geodns, sgp_gw, "SEA users", $tags="normal")
+Rel(geodns, jkt_gw, "IDN users", $tags="normal")
+Rel(geodns, gru_gw, "SA users", $tags="normal")
+Rel(geodns, fra_gw, "EU users", $tags="normal")
+
+' ========== FAILOVER PATHS ==========
+Rel(geodns, jkt_gw, "Точка отказа #4: Отказ SGP региона -> DNS failover to JKT (RTO < 60s)", $tags="failover_path")
+Rel(geodns, fra_gw, "Точка отказа #4: Отказ GRU региона -> DNS failover to FRA (RTO < 60s)", $tags="failover_path")
+
+' ========== HEALTH CHECKS ==========
+Rel(geodns, sgp_gw, "HTTP /health every 10s", $tags="health_check")
+Rel(geodns, jkt_gw, "HTTP /health every 10s", $tags="health_check")
+Rel(geodns, gru_gw, "HTTP /health every 10s", $tags="health_check")
+Rel(geodns, fra_gw, "HTTP /health every 10s", $tags="health_check")
+
+' ========== INTERNAL FLOWS ==========
+Rel(sgp_gw, sgp_pods, "")
+Rel(sgp_pods, sgp_pg, "")
+Rel(sgp_pods, sgp_kafka, "")
+Rel(sgp_pods, sgp_redis, "")
+Rel(sgp_pods, ext_payment, "Circuit Breaker", $tags="normal")
+
+Rel(jkt_gw, jkt_pods, "")
+Rel(jkt_pods, jkt_pg, "")
+Rel(jkt_pods, jkt_kafka, "")
+
+Rel(gru_gw, gru_pods, "")
+Rel(gru_pods, gru_pg, "")
+Rel(gru_pods, gru_kafka, "")
+
+Rel(fra_gw, fra_pods, "")
+Rel(fra_pods, fra_pg, "")
+
+' ========== CROSS-REGION REPLICATION ==========
+Rel(sgp_kafka, jkt_kafka, "MirrorMaker 2 (event replay при failover)", $tags="replication")
+Rel(gru_pg, fra_pg, "Async streaming replication (GRU -> FRA standby)", $tags="replication")
+
+' ========== GLOBAL MONITORING ==========
+Rel(sgp_gw, global_grafana, "Metrics/logs", $tags="health_check")
+Rel(jkt_gw, global_grafana, "Metrics/logs", $tags="health_check")
+Rel(gru_gw, global_grafana, "Metrics/logs", $tags="health_check")
+Rel(fra_gw, global_grafana, "Metrics/logs", $tags="health_check")
+
+SHOW_LEGEND()
+
+@enduml

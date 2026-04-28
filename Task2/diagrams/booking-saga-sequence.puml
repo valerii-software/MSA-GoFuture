@@ -1,0 +1,56 @@
+@startuml Booking_Saga_Sequence
+title Booking Saga - Диаграмма последовательности (happy path)
+
+participant "Пассажир" as passenger
+participant "Booking Service (Orchestrator)" as booking #LightBlue
+participant "Fraud Service" as fraud
+participant "Pricing Service" as pricing
+participant "Geography Service" as geography
+participant "Driver Service" as driver
+participant "Notification Service" as notification
+
+passenger -> booking: Создать заказ
+activate booking
+
+== Шаг 1: Создание бронирования ==
+booking -> booking: CreateBookingCmd (статус: PENDING)
+
+== Шаги 2-4: Параллельная проверка (оптимизация) ==
+booking ->> fraud: CheckBookingFraudCmd
+activate fraud
+booking ->> pricing: CalculatePriceCmd
+activate pricing
+booking ->> geography: CalculateRouteCmd
+activate geography
+
+fraud --> booking: FraudCheckPassed (risk_score: 0.05)
+deactivate fraud
+pricing --> booking: PriceCalculated (price: 450₽, surge: 1.2x)
+deactivate pricing
+geography --> booking: RouteCalculated (ETA: 12 мин, distance: 8.3 км)
+deactivate geography
+
+== Шаг 5: Поиск водителя ==
+booking -> driver: FindDriverCmd ("умное" перераспределение)
+activate driver
+note right of driver
+  Scoring: расстояние +
+  прогноз спроса +
+  surge + рейтинг
+end note
+driver --> booking: DriverAssigned (driver_id, ETA: 4 мин)
+deactivate driver
+
+== Шаг 6: Уведомление (async, не блокирует) ==
+booking ->> notification: NotifyPartiesCmd
+activate notification
+notification --> notification: Push пассажиру + Push водителю
+deactivate notification
+
+== Шаг 7: Подтверждение ==
+booking -> booking: BookingConfirmed
+
+booking --> passenger: Заказ подтвержден (водитель через 4 мин)
+deactivate booking
+
+@enduml

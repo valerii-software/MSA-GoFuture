@@ -1,0 +1,76 @@
+@startuml Event_Data_Flow
+!include https://raw.githubusercontent.com/plantuml-stdlib/C4-PlantUML/master/C4_Container.puml
+
+title GoFuture - Сводная схема потоков событий
+
+' === PRODUCERS ===
+System_Boundary(producers, "Producers (доменные сервисы)") {
+    Container(booking_svc, "Booking Service", "", "BookingCreated TripCompleted BookingCancelled")
+    Container(driver_svc, "Driver Service", "", "DriverLocationUpdated DriverOnline/Offline DriverAssigned")
+    Container(pricing_svc, "Pricing Service", "", "PriceCalculated SurgeUpdated")
+    Container(payments_svc, "Payments Service", "", "PaymentCompleted PayoutCompleted")
+    Container(fraud_svc, "Fraud Service", "", "FraudCheckPassed FraudDetected")
+    Container(geography_svc, "Geography Service", "", "GeozoneEntered GeozoneExited")
+}
+
+' === KAFKA ===
+System_Boundary(kafka_cluster, "Kafka Cluster (per region)") {
+    ContainerQueue(t_booking, "booking.trip. lifecycle.v1", "Kafka", "")
+    ContainerQueue(t_driver_loc, "driver.location. updates.v1", "Kafka", "~100K msg/s")
+    ContainerQueue(t_driver_st, "driver.status. lifecycle.v1", "Kafka", "")
+    ContainerQueue(t_pricing, "pricing.price. events.v1", "Kafka", "")
+    ContainerQueue(t_payment, "payment.transaction. lifecycle.v1", "Kafka", "")
+    ContainerQueue(t_fraud, "fraud.check. events.v1", "Kafka", "")
+    ContainerQueue(t_geo, "geography.zone. events.v1", "Kafka", "")
+    ContainerQueue(t_saga_b, "saga.booking. commands/replies", "Kafka", "")
+    ContainerQueue(t_saga_p, "saga.payment. commands/replies", "Kafka", "")
+    ContainerQueue(t_demand, "pricing.demand. forecast.v1", "Kafka", "")
+}
+
+' === CONSUMERS ===
+System_Boundary(consumers, "Consumers (Flink + Kafka Consumer Groups)") {
+    Container(flink_geo, "GeoIndexer", "Flink", "-> ES + Redis")
+    Container(flink_surge, "Surge Pricing", "Flink", "-> Redis + Kafka")
+    Container(flink_match, "Smart Matching", "Flink", "-> DriverAssigned")
+    Container(flink_fraud, "Fraud Detection", "Flink", "-> FraudDetected")
+    Container(flink_analytics, "Analytics Aggregator", "Flink", "-> ClickHouse")
+    Container(notification_cg, "Notification Dispatcher", "Kafka Consumer", "-> FCM/APNS/Huawei")
+}
+
+' --- Producers -> Topics ---
+Rel(booking_svc, t_booking, "")
+Rel(booking_svc, t_saga_b, "Saga cmds")
+Rel(driver_svc, t_driver_loc, "")
+Rel(driver_svc, t_driver_st, "")
+Rel(pricing_svc, t_pricing, "")
+Rel(payments_svc, t_payment, "")
+Rel(payments_svc, t_saga_p, "Saga cmds")
+Rel(fraud_svc, t_fraud, "")
+Rel(fraud_svc, t_saga_b, "Saga replies")
+Rel(fraud_svc, t_saga_p, "Saga replies")
+Rel(geography_svc, t_geo, "")
+
+' --- Topics -> Consumers ---
+Rel(t_driver_loc, flink_geo, "")
+Rel(t_driver_loc, flink_surge, "")
+Rel(t_driver_loc, flink_match, "")
+Rel(t_booking, flink_surge, "")
+Rel(t_booking, flink_match, "")
+Rel(t_booking, flink_fraud, "")
+Rel(t_booking, flink_analytics, "")
+Rel(t_booking, notification_cg, "")
+Rel(t_driver_st, flink_match, "")
+Rel(t_geo, flink_surge, "")
+Rel(t_payment, flink_fraud, "")
+Rel(t_payment, flink_analytics, "")
+Rel(t_payment, notification_cg, "")
+Rel(t_fraud, notification_cg, "")
+Rel(t_demand, flink_match, "")
+
+' --- Saga consumers ---
+Rel(t_saga_b, fraud_svc, "Saga cmds")
+Rel(t_saga_b, pricing_svc, "Saga cmds")
+Rel(t_saga_b, driver_svc, "Saga cmds")
+Rel(t_saga_p, fraud_svc, "Saga cmds")
+
+@enduml

@@ -1,0 +1,171 @@
+@startuml C4_Data_Pipeline_GoFuture
+!include https://raw.githubusercontent.com/plantuml-stdlib/C4-PlantUML/master/C4_Container.puml
+
+title GoFuture - C4: Пайплайн данных из микросервисов в ML-платформу и BI
+
+AddElementTag("source", $bgColor="#2E86C1", $fontColor="white")
+AddElementTag("ingestion", $bgColor="#E67E22", $fontColor="white")
+AddElementTag("stream", $bgColor="#8E44AD", $fontColor="white")
+AddElementTag("batch", $bgColor="#27AE60", $fontColor="white")
+AddElementTag("storage", $bgColor="#1A5276", $fontColor="white")
+AddElementTag("ml", $bgColor="#C0392B", $fontColor="white")
+AddElementTag("bi", $bgColor="#D4AC0D", $fontColor="black")
+AddElementTag("quality", $bgColor="#17A589", $fontColor="white")
+
+' ========== DATA SOURCES (Microservices) ==========
+System_Boundary(sources, "Источники данных (Микросервисы)") {
+    Container(booking_svc, "Booking Service", "Python/Go", "BookingCreated, TripCompleted, BookingCancelled", $tags="source")
+    Container(driver_svc, "Driver Service", "Python/Go", "DriverLocationUpdated (~100K/s), DriverOnline/Offline", $tags="source")
+    Container(pricing_svc, "Pricing Service", "Python/Go", "PriceCalculated, SurgeUpdated", $tags="source")
+    Container(payments_svc, "Payments Service", "Python/Go", "PaymentCompleted, PayoutCompleted, RefundProcessed", $tags="source")
+    Container(fraud_svc, "Fraud Service", "Python/Go", "FraudDetected, FraudCheckPassed, RiskScoreUpdated", $tags="source")
+    Container(geography_svc, "Geography Service", "Python/Go", "GeozoneEntered, GeozoneExited", $tags="source")
+}
+
+' ========== DATA INGESTION (Kafka + CDC) ==========
+System_Boundary(ingestion, "Слой сбора данных (Data Ingestion)") {
+    ContainerQueue(kafka, "Apache Kafka", "Event Bus", "~150K events/sec. 16 топиков. Retention: 1ч - 30д. Avro + Schema Registry", $tags="ingestion")
+    Container(debezium, "Debezium CDC", "Kafka Connect", "WAL PostgreSQL -> Kafka topics. ~10K changes/sec. Outbox relay", $tags="ingestion")
+    Container(schema_reg, "Schema Registry", "Confluent / Apicurio", "Avro-схемы. Backward compatibility. Validation на входе", $tags="quality")
+    Container(external_ingest, "External Ingest", "Airflow + API", "Погодные данные, городские события, календарь праздников", $tags="ingestion")
+}
+
+' ========== STREAM PROCESSING (Flink) ==========
+System_Boundary(stream_layer, "Stream Processing (Apache Flink)") {
+    Container(flink_features, "Feature Aggregator", "Flink Job", "Real-time фичи для ML: bookings/min per zone, driver supply/demand, avg ETA. Window: 5s–15min", $tags="stream")
+    Container(flink_surge, "Surge Pricing Job", "Flink Job", "Input: locations + bookings + zones. Output: SurgeUpdated. Window: sliding 5min", $tags="stream")
+    Container(flink_fraud, "Fraud Detection Job", "Flink Job", "Input: bookings + payments + locations. Output: risk score. Session window 5min", $tags="stream")
+    Container(flink_lake, "Data Lake Writer", "Flink Job", "Все события -> S3 Iceberg. Partition: date + type. Flush: 30 sec. Driver location: 10% sample", $tags="stream")
+    Container(flink_ch, "ClickHouse Writer", "Flink Job", "Агрегированные метрики -> ClickHouse. Материализованные views. Latency < 60s", $tags="stream")
+    Container(flink_dq, "Inline DQ Checks", "Flink (sidecar)", "Range checks, null checks, enum validation. Невалидные -> DLQ. Metrics -> Prometheus", $tags="quality")
+}
+
+' ========== BATCH PROCESSING (Spark) ==========
+System_Boundary(batch_layer, "Batch Processing (Apache Spark)") {
+    Container(spark_training, "Training Data Builder", "Spark Job", "Daily, 03:00 UTC. Iceberg -> enriched training datasets. Join: trips + pricing + geography + fraud", $tags="batch")
+    Container(spark_features, "Feature Backfill", "Spark Job", "Пересчет исторических фичей. Iceberg -> Feature Store (offline layer)", $tags="batch")
+    Container(spark_agg, "Historical Aggregator", "Spark Job", "Daily, 04:00 UTC. Когорты, retention, LTV, heavy JOINs. -> ClickHouse", $tags="batch")
+    Container(spark_dq, "Data Quality Checks", "Spark + GX", "Каждые 6 часов. Great Expectations. Completeness, freshness, validity, distribution, volume. -> DQ metrics", $tags="quality")
+}
+
+' ========== DATA STORAGE ==========
+System_Boundary(storage_layer, "Слой хранения данных") {
+    ContainerDb(iceberg, "Data Lake", "S3 + Apache Iceberg", "raw/ - сырые события (90д) processed/ - enriched (1г) features/ - offline store training/ - datasets ACID, time travel, schema evolution", $tags="storage")
+    ContainerDb(clickhouse, "ClickHouse", "Analytical DB", "trips_raw, trips_hourly, payments_raw, surge_history, fraud_events, cohort_analysis. BI-ready агрегации", $tags="storage")
+    ContainerDb(feature_online, "Feature Store (Online)", "Redis", "Real-time фичи для inference: zone_bookings_15min, driver_supply_demand, payment_velocity. Latency < 5ms", $tags="ml")
+    ContainerDb(feature_offline, "Feature Store (Offline)", "Iceberg (S3)", "Исторические фичи: user_trips_30d, driver_rating_30d, zone_demand_by_hour. Для обучения", $tags="ml")
+}
+
+' ========== ML PLATFORM ==========
+System_Boundary(ml_platform, "ML-платформа") {
+    Container(mlflow, "MLflow", "Tracking + Model Registry", "Experiment tracking. Model versioning. Staging -> Production. Metrics, parameters, artifacts", $tags="ml")
+    Container(airflow, "Apache Airflow", "Orchestration", "ML pipeline DAGs: data extraction -> feature eng. -> DQ validation -> training -> deployment", $tags="ml")
+    Container(model_training, "Model Training", "Spark MLlib + PyTorch", "Surge (LightGBM, daily). Demand (TFT, weekly). Fraud (Ensemble, weekly)", $tags="ml")
+    Container(model_serving, "Model Serving", "KServe (K8s)", "Real-time inference: Surge < 50ms, Fraud < 100ms. Autoscaling. Shadow deployment. A/B testing", $tags="ml")
+    Container(evidently, "Model Monitoring", "Evidently AI", "Feature drift, prediction drift, label drift. Train-serve skew detection", $tags="quality")
+}
+
+' ========== BI LAYER ==========
+System_Boundary(bi_layer, "BI и аналитика") {
+    Container(datalens, "DataLens", "BI Tool", "Executive Overview, Regional Performance, Unit Economics, Fraud Analytics", $tags="bi")
+    Container(grafana_bi, "Grafana", "Operational BI", "ML Model Health, Data Platform Health, Demand & Supply", $tags="bi")
+    Container(jupyter, "JupyterHub", "Notebooks", "Exploratory analysis, ad-hoc запросы, прототипирование моделей", $tags="bi")
+}
+
+' ========== DATA QUALITY & LINEAGE ==========
+System_Boundary(dq_layer, "Качество данных и Lineage") {
+    Container(data_contracts, "Data Contracts", "YAML + CI/CD", "Контракты producer -> consumer. SLA: freshness, completeness. Semantic rules. CI enforcement", $tags="quality")
+    Container(openlineage, "Data Lineage", "OpenLineage + Marquez", "Происхождение данных: Kafka -> Flink -> Iceberg -> Spark -> ML. Impact analysis. Compliance audit", $tags="quality")
+    Container(dq_prometheus, "DQ Metrics", "Prometheus + Grafana", "data_quality_score, completeness, freshness, validity, volume_anomaly, feature_drift_score", $tags="quality")
+}
+
+Person(data_scientist, "Data Scientist", "Обучает модели, анализирует данные")
+Person(analyst, "Бизнес-аналитик", "BI-отчеты, когортный анализ")
+
+' ========== CONNECTIONS: SOURCES -> INGESTION ==========
+
+Rel(booking_svc, kafka, "Outbox -> Debezium -> Kafka (at-least-once)")
+Rel(driver_svc, kafka, "Direct produce (~100K/s)")
+Rel(pricing_svc, kafka, "Outbox -> Debezium")
+Rel(payments_svc, kafka, "Outbox -> Debezium")
+Rel(fraud_svc, kafka, "Outbox -> Debezium")
+Rel(geography_svc, kafka, "Events")
+
+Rel(booking_svc, debezium, "WAL CDC")
+Rel(payments_svc, debezium, "WAL CDC")
+Rel(debezium, kafka, "CDC events")
+
+Rel(external_ingest, iceberg, "Weather, events, holidays (batch)")
+
+Rel(kafka, schema_reg, "Schema validation (Avro)")
+Rel(data_contracts, schema_reg, "Contract -> Schema enforcement")
+
+' ========== CONNECTIONS: KAFKA -> STREAM PROCESSING ==========
+
+Rel(kafka, flink_features, "All business events")
+Rel(kafka, flink_surge, "location + booking + zone events")
+Rel(kafka, flink_fraud, "booking + payment + location events")
+Rel(kafka, flink_lake, "All events (driver loc: 10% sample)")
+Rel(kafka, flink_ch, "Aggregated metrics")
+Rel(kafka, flink_dq, "All events (inline validation)")
+
+' ========== CONNECTIONS: FLINK -> STORAGE ==========
+
+Rel(flink_features, feature_online, "Upsert real-time features (< 5s)")
+Rel(flink_lake, iceberg, "Raw events -> Iceberg (30s flush)")
+Rel(flink_ch, clickhouse, "Aggregated -> ClickHouse (< 60s)")
+Rel(flink_surge, feature_online, "Surge coefficient per zone")
+Rel(flink_fraud, feature_online, "Payment velocity, device fingerprint")
+Rel(flink_dq, dq_prometheus, "DQ metrics: validity, null rate")
+
+' ========== CONNECTIONS: STORAGE -> BATCH PROCESSING ==========
+
+Rel(iceberg, spark_training, "Raw + processed events (Iceberg scan)")
+Rel(iceberg, spark_features, "Raw events -> historical features")
+Rel(iceberg, spark_agg, "Events -> heavy aggregations")
+Rel(iceberg, spark_dq, "Data for quality checks")
+Rel(feature_offline, spark_training, "Offline features for training")
+
+Rel(spark_training, iceberg, "Training datasets (versioned)")
+Rel(spark_features, feature_offline, "Historical features -> offline store")
+Rel(spark_features, feature_online, "Materialized offline -> online")
+Rel(spark_agg, clickhouse, "Cohort analysis, LTV, retention")
+Rel(spark_dq, dq_prometheus, "GX results: completeness, freshness, validity")
+
+' ========== CONNECTIONS: ML PLATFORM ==========
+
+Rel(airflow, spark_training, "Orchestrate: DAG schedule")
+Rel(airflow, model_training, "Trigger training + validation")
+Rel(spark_training, model_training, "Training data")
+Rel(feature_offline, model_training, "Offline features for training")
+Rel(model_training, mlflow, "Log experiments, register models")
+Rel(mlflow, model_serving, "Deploy model (Staging -> Prod)")
+Rel(feature_online, model_serving, "Online features for inference (< 5ms)")
+
+Rel(model_serving, flink_surge, "Surge prediction (< 50ms)")
+Rel(model_serving, flink_fraud, "Fraud score (< 100ms)")
+
+Rel(model_serving, evidently, "Predictions + feature values")
+Rel(evidently, dq_prometheus, "Drift scores, model performance")
+
+' ========== CONNECTIONS: BI ==========
+
+Rel(clickhouse, datalens, "SQL queries (BI reports)")
+Rel(clickhouse, grafana_bi, "Operational metrics")
+Rel(iceberg, jupyter, "Ad-hoc queries (Spark SQL)")
+Rel(feature_offline, jupyter, "Feature exploration")
+Rel(dq_prometheus, grafana_bi, "DQ dashboards, ML health")
+
+Rel(analyst, datalens, "BI-отчеты")
+Rel(data_scientist, jupyter, "Исследования, прототипы")
+Rel(data_scientist, mlflow, "Эксперименты, модели")
+
+' ========== CONNECTIONS: LINEAGE ==========
+
+Rel(flink_lake, openlineage, "Lineage events")
+Rel(spark_training, openlineage, "Lineage events")
+Rel(spark_agg, openlineage, "Lineage events")
+
+SHOW_LEGEND()
+
+@enduml

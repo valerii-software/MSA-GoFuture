@@ -1,0 +1,48 @@
+@startuml Booking_Saga_Compensation
+title Booking Saga - Сценарии компенсации
+
+participant "Booking (Orchestrator)" as booking #LightBlue
+participant "Fraud" as fraud
+participant "Pricing" as pricing
+participant "Driver" as driver
+participant "Notification" as notification
+
+== Сценарий A: Фрод обнаружен (шаг 2) ==
+
+booking -> fraud: CheckBookingFraudCmd
+fraud --> booking: FraudDetected (risk_score: 0.85)
+
+booking -> booking: CancelBookingCmd (статус: CANCELLED_FRAUD)
+booking ->> notification: NotifyPassengerCmd ("Заказ отменен")
+
+== Сценарий B: Нет водителей (шаг 5, таймаут) ==
+
+booking -> driver: FindDriverCmd
+driver --> booking: DriverNotFound (timeout 30s)
+
+booking -> driver: RetryFindDriverCmd (расширение радиуса +2 км)
+driver --> booking: DriverNotFound
+
+booking -> driver: RetryFindDriverCmd (расширение радиуса +4 км)
+driver --> booking: DriverNotFound
+
+note over booking: Все 3 попытки исчерпаны
+booking -> booking: CancelBookingCmd (статус: CANCELLED_NO_DRIVER)
+booking ->> notification: NotifyPassengerCmd ("Нет доступных водителей")
+
+== Сценарий C: Водитель отменил после назначения ==
+
+booking -> driver: FindDriverCmd
+driver --> booking: DriverAssigned (driver_42)
+
+... 10 сек позже ...
+
+driver --> booking: DriverCancelled (driver_42)
+
+booking -> driver: ReleaseDriverCmd (driver_42) (штраф к рейтингу)
+booking -> driver: RetryFindDriverCmd (новый поиск, исключая driver_42)
+booking ->> notification: NotifyPassengerCmd ("Ищем другого водителя")
+driver --> booking: DriverAssigned (driver_87)
+booking -> booking: BookingConfirmed
+
+@enduml
